@@ -8,6 +8,88 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix
 
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from sklearn.metrics import roc_curve, auc, confusion_matrix
+import seaborn as sns
+
+def plot_results(y_true, y_pred_prob, y_pred):
+    """绘制分类效果可视化图"""
+    
+    fig = plt.figure(figsize=(16, 12))
+    fig.suptitle('1D-CNN 异常检测分类效果', fontsize=16, fontweight='bold')
+    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.4, wspace=0.35)
+
+    # ── 1. 混淆矩阵 ──────────────────────────────────────────
+    ax1 = fig.add_subplot(gs[0, 0])
+    cm = confusion_matrix(y_true, y_pred)
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
+                xticklabels=['Normal', 'Anomaly'],
+                yticklabels=['Normal', 'Anomaly'], ax=ax1)
+    ax1.set_xlabel('Predicted Label')
+    ax1.set_ylabel('True Label')
+    ax1.set_title('Confusion Matrix')
+
+    # ── 2. ROC 曲线 ──────────────────────────────────────────
+    ax2 = fig.add_subplot(gs[0, 1])
+    fpr, tpr, _ = roc_curve(y_true, y_pred_prob)
+    roc_auc = auc(fpr, tpr)
+    ax2.plot(fpr, tpr, color='darkorange', lw=2,
+             label=f'ROC Curve (AUC = {roc_auc:.4f})')
+    ax2.plot([0, 1], [0, 1], color='navy', lw=1, linestyle='--', label='Random')
+    ax2.set_xlim([0.0, 1.0])
+    ax2.set_ylim([0.0, 1.05])
+    ax2.set_xlabel('False Positive Rate')
+    ax2.set_ylabel('True Positive Rate')
+    ax2.set_title('ROC Curve')
+    ax2.legend(loc='lower right')
+
+    # ── 3. 预测概率分布 ──────────────────────────────────────
+    ax3 = fig.add_subplot(gs[0, 2])
+    normal_probs  = y_pred_prob[y_true.flatten() == 0]
+    anomaly_probs = y_pred_prob[y_true.flatten() == 1]
+    ax3.hist(normal_probs,  bins=30, alpha=0.6, color='steelblue',  label='Normal')
+    ax3.hist(anomaly_probs, bins=30, alpha=0.6, color='tomato',     label='Anomaly')
+    ax3.axvline(x=0.5, color='black', linestyle='--', lw=1.5, label='Threshold=0.5')
+    ax3.set_xlabel('Predicted Probability')
+    ax3.set_ylabel('Count')
+    ax3.set_title('Prediction Probability Distribution')
+    ax3.legend()
+
+    # ── 4. 样本预测散点图（按索引顺序） ──────────────────────
+    ax4 = fig.add_subplot(gs[1, :2])
+    indices = np.arange(len(y_true))
+    colors = np.where(y_pred.flatten() == y_true.flatten(), 'steelblue', 'tomato')
+    ax4.scatter(indices, y_pred_prob, c=colors, s=8, alpha=0.6)
+    ax4.axhline(y=0.5, color='black', linestyle='--', lw=1.5, label='Threshold=0.5')
+    ax4.set_xlabel('Sample Index')
+    ax4.set_ylabel('Predicted Probability')
+    ax4.set_title('Per-Sample Prediction  (Blue=Correct, Red=Misclassified)')
+    ax4.legend()
+
+    # ── 5. 准确率 / Precision / Recall / F1 柱状图 ──────────
+    ax5 = fig.add_subplot(gs[1, 2])
+    from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+    metrics = {
+        'Accuracy' : accuracy_score(y_true, y_pred),
+        'Precision': precision_score(y_true, y_pred),
+        'Recall'   : recall_score(y_true, y_pred),
+        'F1-Score' : f1_score(y_true, y_pred),
+        'AUC'      : roc_auc,
+    }
+    bars = ax5.bar(metrics.keys(), metrics.values(),
+                   color=['steelblue', 'mediumseagreen', 'goldenrod', 'coral', 'mediumpurple'])
+    ax5.set_ylim(0, 1.1)
+    ax5.set_ylabel('Score')
+    ax5.set_title('Overall Metrics')
+    for bar, val in zip(bars, metrics.values()):
+        ax5.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                 f'{val:.3f}', ha='center', va='bottom', fontsize=9)
+
+    plt.savefig('classification_results.png', dpi=150, bbox_inches='tight')
+    plt.show()
+    print("图表已保存至 classification_results.png")
+
 # ---------------------------------------------------------
 # 1. 数据加载与预处理 (包含你的原始函数)
 # ---------------------------------------------------------
@@ -16,7 +98,7 @@ def generate_mask_matrix():
     """读取之前生成的块状分布 CSV 数据"""
     try:
         # 读取 CSV，保留表头以便确认列名
-        df = pd.read_csv("./TEP_3000_Block_Split.csv")
+        df = pd.read_csv("../TEP_3000_Block_Split.csv")
         # 提取 xmeas_1 到 xmeas_41 (丢弃后面的 xmv)
         data_df = df.filter(like='xmeas_').iloc[:, :41]
         data = data_df.astype(float).to_numpy()
@@ -166,6 +248,8 @@ def train_model():
         # 详细报告
         print("\n分类报告:")
         print(classification_report(y_true, y_pred, target_names=['Normal', 'Anomaly']))
+        y_pred_prob = outputs.numpy().flatten()
+        plot_results(y_true, y_pred_prob, y_pred)
         
 if __name__ == "__main__":
     train_model()

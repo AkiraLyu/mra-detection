@@ -14,7 +14,7 @@ def generate_mask_matrix():
     """读取之前生成的块状分布 CSV 数据"""
     try:
         # 假设 csv 在当前路径
-        df = pd.read_csv("./TEP_3000_Block_Split.csv")
+        df = pd.read_csv("../TEP_3000_Block_Split.csv")
         data_df = df.filter(like='xmeas_').iloc[:, :41]
         data = data_df.astype(float).to_numpy()
         mask = np.isnan(data).astype(int)

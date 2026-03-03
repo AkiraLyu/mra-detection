@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 # 检查设备 (GPU 优先)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"🐱 运行设备: {device}")
+print(f"运行设备: {device}")
 
 # ---------------------------------------------------------
 # 1. 数据集类 (Dataset)
@@ -32,7 +32,7 @@ def load_data():
     """读取数据，填充缺失值，生成标签并划分"""
     try:
         print("📥 正在读取数据...")
-        df = pd.read_csv("./TEP_3000_Block_Split.csv")
+        df = pd.read_csv("../TEP_3000_Block_Split.csv")
         
         # 1. 提取特征
         data_df = df.filter(like='xmeas_').iloc[:, :41]
