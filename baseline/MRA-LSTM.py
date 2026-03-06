@@ -1,213 +1,701 @@
+"""
+MRA-LSTM for Anomaly Detection on TEP Dataset
+Based on "Unmanned Aerial Vehicle Flight Data Anomaly Detection
+Based on Multirate-Aware LSTM"
+"""
+
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings('ignore')
 
-# 检查设备 (GPU 优先)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"运行设备: {device}")
 
-# ---------------------------------------------------------
-# 1. 数据集类 (Dataset)
-# ---------------------------------------------------------
 class TEPDataset(Dataset):
-    def __init__(self, X, y):
-        # PyTorch Conv1d 需要输入形状为 (Batch, Channels, Length)
-        # 原始 X 形状: (Sample, 41) -> 变成 (Sample, 1, 41)
-        self.X = torch.FloatTensor(X).unsqueeze(1) 
-        # 标签如果是 CrossEntropyLoss，需要 LongTensor 且不需要 One-hot (直接用 0, 1)
-        self.y = torch.LongTensor(y)
-        
+    """Dataset for Tennessee Eastman Process data"""
+    def __init__(self, data, sequence_length=30, prediction_horizon=1, training=True):
+        self.data = data
+        self.sequence_length = sequence_length
+        self.prediction_horizon = prediction_horizon
+        self.training = training
+
+        # Create sliding window sequences
+        self.sequences = []
+        self.labels = []
+
+        if training:
+            # For training: create sequences from normal data
+            for i in range(len(data) - sequence_length - prediction_horizon + 1):
+                x = data[i:i + sequence_length]
+                y = data[i + sequence_length:i + sequence_length + prediction_horizon]
+                self.sequences.append((x, y))
+                self.labels.append(0)  # Normal = 0
+        else:
+            # For testing: create sequences from all data
+            for i in range(len(data) - sequence_length - prediction_horizon + 1):
+                x = data[i:i + sequence_length]
+                y = data[i + sequence_length:i + sequence_length + prediction_horizon]
+                # Use faultNumber as label (0 = normal, >0 = fault)
+                fault_num = int(data['faultNumber'].iloc[i + sequence_length]) if 'faultNumber' in data.columns else 0
+                self.sequences.append((x, y))
+                self.labels.append(fault_num)
+
     def __len__(self):
-        return len(self.X)
-    
+        return len(self.sequences)
+
     def __getitem__(self, idx):
-        return self.X[idx], self.y[idx]
+        x, y = self.sequences[idx]
+        label = self.labels[idx]
+        # Drop non-feature columns for model input
+        feature_cols = [c for c in x.columns if c not in ['faultNumber', 'simulationRun', 'sample']]
+        x_tensor = torch.FloatTensor(x[feature_cols].values)
+        y_tensor = torch.FloatTensor(y[feature_cols].values)
+        return x_tensor, y_tensor, label
 
-def load_data():
-    """读取数据，填充缺失值，生成标签并划分"""
-    try:
-        print("📥 正在读取数据...")
-        df = pd.read_csv("../TEP_3000_Block_Split.csv")
-        
-        # 1. 提取特征
-        data_df = df.filter(like='xmeas_').iloc[:, :41]
-        
-        # 2. 填充 NaN (用 0 填充，对应 Mask 机制)
-        data_filled = data_df.fillna(0).astype(float).to_numpy()
-        
-        # 3. 生成标签 (前1500正常=0, 后1500异常=1)
-        # 注意：PyTorch CrossEntropyLoss 期望标签是 1D 数组 [0, 1, 0, ...]，而不是 One-hot
-        y = np.concatenate([np.zeros(1500), np.ones(1500)])
-        
-        print(f"📊 数据形状: {data_filled.shape}")
-        
-        # 4. 划分训练集和测试集
-        X_train, X_test, y_train, y_test = train_test_split(
-            data_filled, y, test_size=0.2, random_state=42, shuffle=True
-        )
-        
-        return X_train, X_test, y_train, y_test
-        
-    except FileNotFoundError:
-        print("找不到文件，请检查路径！")
-        return None, None, None, None
 
-# ---------------------------------------------------------
-# 2. 模型构建 (CNN-LSTM)
-# ---------------------------------------------------------
-class CNNLSTMModel(nn.Module):
-    def __init__(self, input_len=41, num_classes=2):
-        super(CNNLSTMModel, self).__init__()
-        
-        # --- CNN 部分 (提取局部特征) ---
-        # 参照论文 Table 5 [cite: 454]，但为了适配 input_len=41 减小了 kernel_size
-        
-        # Layer 1: Conv -> Tanh -> MaxPool
-        # Input: (Batch, 1, 41) -> Padding=2 保持长度 -> (Batch, 16, 41)
-        self.c1 = nn.Conv1d(in_channels=1, out_channels=16, kernel_size=5, padding=2)
-        self.act1 = nn.Tanh() # 论文公式 (1) 指定 Tanh [cite: 143]
-        self.p1 = nn.MaxPool1d(kernel_size=2)
-        
-        # Layer 2
-        # Input: (Batch, 16, 20)
-        self.c2 = nn.Conv1d(16, 32, kernel_size=5, padding=2)
-        self.act2 = nn.Tanh()
-        self.p2 = nn.MaxPool1d(2)
-        
-        # Layer 3
-        # Input: (Batch, 32, 10)
-        self.c3 = nn.Conv1d(32, 64, kernel_size=3, padding=1)
-        self.act3 = nn.Tanh()
-        self.p3 = nn.MaxPool1d(2)
-        
-        # Output after CNN: (Batch, 64, 5)
-        
-        # --- LSTM 部分 (挖掘时间相关性) ---
-        # LSTM 需要输入 (Batch, Sequence, Features)
-        # 所以我们需要在 forward 中把 (Batch, 64, 5) 转置为 (Batch, 5, 64)
-        self.lstm = nn.LSTM(input_size=64, hidden_size=64, batch_first=True)
-        
-        # --- 全连接与分类 ---
-        # FC (Nodes 32) -> Tanh -> BN [cite: 250, 251]
-        self.fc1 = nn.Linear(64, 32)
-        self.fc_act = nn.Tanh()
-        self.bn = nn.BatchNorm1d(32)
-        
-        # Output Layer
-        self.fc_out = nn.Linear(32, num_classes)
-        # 注意：不加 Softmax，因为 CrossEntropyLoss 会自动处理
+class StraightThroughEstimator(torch.autograd.Function):
+    """Straight-through estimator for discrete boundaries"""
+    @staticmethod
+    def forward(ctx, x):
+        # Forward: use step function
+        ctx.save_for_backward(x)
+        return (x > 0.5).float()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        # Backward: use hard sigmoid (differentiable)
+        x, = ctx.saved_tensors
+        # Hard sigmoid: max(0, min(1, (x + 1) / 2))
+        grad_x = torch.where((x > -1) & (x < 1), grad_output * 0.5, torch.zeros_like(grad_output))
+        return grad_x
+
+
+class MRALSTMCell(nn.Module):
+    """Multirate-Aware LSTM Cell"""
+    def __init__(self, hidden_size, lower_hidden_size, higher_hidden_size, input_size=None):
+        super(MRALSTMCell, self).__init__()
+        self.hidden_size = hidden_size
+        self.lower_hidden_size = lower_hidden_size
+        self.higher_hidden_size = higher_hidden_size
+        self.input_size = input_size
+
+        # Gate parameters (f: forget, i: input, o: output, g: cell proposal, s: boundary)
+        # W: connection from own hidden state
+        self.W_f = nn.Linear(hidden_size, hidden_size)
+        self.W_i = nn.Linear(hidden_size, hidden_size)
+        self.W_o = nn.Linear(hidden_size, hidden_size)
+        self.W_g = nn.Linear(hidden_size, hidden_size)
+        self.W_s = nn.Linear(hidden_size, 1)
+
+        # U: connection from input (only for lowest layer)
+        if input_size is not None:
+            self.U_f = nn.Linear(input_size, hidden_size)
+            self.U_i = nn.Linear(input_size, hidden_size)
+            self.U_o = nn.Linear(input_size, hidden_size)
+            self.U_g = nn.Linear(input_size, hidden_size)
+            self.U_s = nn.Linear(input_size, 1)
+
+        # V: connection from lower layer (higher rate)
+        if lower_hidden_size is not None:
+            self.V_f = nn.Linear(lower_hidden_size, hidden_size)
+            self.V_i = nn.Linear(lower_hidden_size, hidden_size)
+            self.V_o = nn.Linear(lower_hidden_size, hidden_size)
+            self.V_g = nn.Linear(lower_hidden_size, hidden_size)
+            self.V_s = nn.Linear(lower_hidden_size, 1)
+
+        # Z: connection from higher layer (lower rate)
+        if higher_hidden_size is not None:
+            self.Z_f = nn.Linear(higher_hidden_size, hidden_size)
+            self.Z_i = nn.Linear(higher_hidden_size, hidden_size)
+            self.Z_o = nn.Linear(higher_hidden_size, hidden_size)
+            self.Z_g = nn.Linear(higher_hidden_size, hidden_size)
+            self.Z_s = nn.Linear(higher_hidden_size, 1)
+
+    def forward(self, h_prev, c_prev, h_lower=None, h_higher=None, x=None, s_prev=None, s_lower=None):
+        """
+        h_prev: hidden state from previous time step (batch_size, hidden_size)
+        c_prev: cell state from previous time step (batch_size, hidden_size)
+        h_lower: hidden state from lower layer (higher rate) (batch_size, lower_hidden_size)
+        h_higher: hidden state from higher layer (lower rate) (batch_size, higher_hidden_size)
+        x: input at current time step (batch_size, input_size)
+        s_prev: boundary from previous time step (batch_size,)
+        s_lower: boundary from lower layer (batch_size,)
+        """
+        batch_size = h_prev.size(0)
+
+        # Initialize s_prev and s_lower if None
+        if s_prev is None:
+            s_prev = torch.zeros(batch_size, device=h_prev.device)
+        if s_lower is None:
+            s_lower = torch.zeros(batch_size, device=h_prev.device)
+
+        # Determine operator type based on mean of boundaries for the whole batch
+        s_prev_mean = s_prev.float().mean().item()
+        s_lower_mean = s_lower.float().mean().item()
+
+        # Calculate gates based on operator type
+        has_input = x is not None
+        has_lower = h_lower is not None
+
+        if s_prev_mean < 0.5 and s_lower_mean >= 0.5:
+            # Operator 1: Input and lower layer available
+            f = torch.sigmoid(self.W_f(h_prev))
+            i = torch.sigmoid(self.W_i(h_prev))
+            o = torch.sigmoid(self.W_o(h_prev))
+            g = torch.tanh(self.W_g(h_prev))
+            s_logits = self.W_s(h_prev)
+
+            if has_input:
+                f = f + torch.sigmoid(self.U_f(x))
+                i = i + torch.sigmoid(self.U_i(x))
+                o = o + torch.sigmoid(self.U_o(x))
+                g = g + torch.tanh(self.U_g(x))
+                s_logits = s_logits + self.U_s(x)
+
+            if has_lower:
+                f = f + torch.sigmoid(self.V_f(h_lower))
+                i = i + torch.sigmoid(self.V_i(h_lower))
+                o = o + torch.sigmoid(self.V_o(h_lower))
+                g = g + torch.tanh(self.V_g(h_lower))
+                s_logits = s_logits + self.V_s(h_lower)
+
+            f = torch.sigmoid(f)
+            i = torch.sigmoid(i)
+            o = torch.sigmoid(o)
+
+        elif s_prev_mean >= 0.5 and s_lower_mean < 0.5 and h_higher is not None:
+            # Operator 2: Only higher layer available
+            f = torch.zeros_like(h_prev)
+            i = torch.sigmoid(self.Z_i(h_higher))
+            o = torch.sigmoid(self.Z_o(h_higher))
+            g = torch.tanh(self.Z_g(h_higher))
+            s_logits = self.Z_s(h_higher)
+
+        elif s_prev_mean >= 0.5 and s_lower_mean >= 0.5:
+            # Operator 3: Higher layer and input available
+            if h_higher is not None:
+                i = torch.sigmoid(self.Z_i(h_higher))
+                o = torch.sigmoid(self.Z_o(h_higher))
+                g = torch.tanh(self.Z_g(h_higher))
+                s_logits = self.Z_s(h_higher)
+            else:
+                i = torch.zeros_like(h_prev)
+                o = torch.zeros_like(h_prev)
+                g = torch.zeros_like(h_prev)
+                s_logits = torch.zeros(batch_size, 1, device=h_prev.device)
+
+            f = torch.zeros_like(h_prev)
+
+            if has_input:
+                i = i + torch.sigmoid(self.U_i(x))
+                o = o + torch.sigmoid(self.U_o(x))
+                g = g + torch.tanh(self.U_g(x))
+                s_logits = s_logits + self.U_s(x)
+
+            i = torch.sigmoid(i)
+            o = torch.sigmoid(o)
+
+        else:
+            # Operator 4: No update, only calculate boundary
+            f = torch.zeros_like(h_prev)
+            i = torch.zeros_like(h_prev)
+            o = torch.zeros_like(h_prev)
+            g = torch.zeros_like(h_prev)
+
+            if has_lower:
+                s_logits = self.V_s(h_lower)
+            else:
+                s_logits = self.W_s(h_prev)
+
+        # Apply straight-through estimator for boundary
+        s = StraightThroughEstimator.apply(s_logits).squeeze(-1)
+
+        # Update cell state
+        if s_prev_mean < 0.5:
+            c = f * c_prev + i * g
+        else:
+            c = i * g
+
+        # Update hidden state
+        if s_prev_mean < 0.5 or s_lower_mean < 0.5:
+            h = o * torch.tanh(c)
+        else:
+            h = h_prev
+
+        return h, c, s
+
+
+class HierarchicalStateExcitation(nn.Module):
+    """Hierarchical State Excitation module"""
+    def __init__(self, hidden_sizes):
+        super(HierarchicalStateExcitation, self).__init__()
+        self.hidden_sizes = hidden_sizes
+        total_hidden = sum(hidden_sizes)
+
+        # Calculate modulation coefficients - one coefficient per layer
+        # This learns to weight the importance of each layer's output
+        self.Q_r = nn.ModuleList([nn.Linear(total_hidden, 1) for _ in range(len(hidden_sizes))])
+
+        # Projection layer to output final hidden size
+        self.output_size = hidden_sizes[-1]
+
+    def forward(self, states):
+        """
+        states: list of hidden states from each layer [h^1_t, h^2_t, ..., h^N_t]
+        """
+        batch_size = states[0].size(0)
+        device = states[0].device
+
+        # Concatenate all states
+        h_concat = torch.cat(states, dim=-1)
+
+        # Calculate modulation coefficients for each layer
+        r_list = []
+        for idx, q_r in enumerate(self.Q_r):
+            r_k = torch.sigmoid(q_r(h_concat))  # (batch_size, 1)
+            r_list.append(r_k)
+
+        # Project each state to output size and aggregate with modulation coefficients
+        # First, project all states to the same output size
+        projected_states = []
+        for h, hs in zip(states, self.hidden_sizes):
+            if hs != self.output_size:
+                # Simple projection using linear layer (learned during training)
+                if not hasattr(self, f'proj_{hs}'):
+                    setattr(self, f'proj_{hs}', nn.Linear(hs, self.output_size).to(device))
+                proj_layer = getattr(self, f'proj_{hs}')
+                projected = proj_layer(h)
+            else:
+                projected = h
+            projected_states.append(projected)
+
+        # Aggregate with modulation coefficients
+        e = torch.zeros(batch_size, self.output_size, device=device)
+        for proj_h, r in zip(projected_states, r_list):
+            e = e + r * proj_h
+        e = torch.relu(e)
+
+        return e
+
+
+class MRALSTM(nn.Module):
+    """Multirate-Aware LSTM Network"""
+    def __init__(self, input_size, hidden_sizes, num_layers, output_size, prediction_horizon=1):
+        super(MRALSTM, self).__init__()
+        self.input_size = input_size
+        self.hidden_sizes = hidden_sizes
+        self.num_layers = num_layers
+        self.output_size = output_size
+        self.prediction_horizon = prediction_horizon
+
+        # Create LSTM cells for each layer
+        self.cells = nn.ModuleList()
+        for idx in range(num_layers):
+            # Determine sizes for connections
+            lower_hidden = hidden_sizes[idx - 1] if idx > 0 else None
+            higher_hidden = hidden_sizes[idx + 1] if idx < num_layers - 1 else None
+            inp_size = input_size if idx == 0 else None
+
+            cell = MRALSTMCell(hidden_sizes[idx], lower_hidden, higher_hidden, inp_size)
+            self.cells.append(cell)
+
+        # Hierarchical State Excitation
+        self.hse = HierarchicalStateExcitation(hidden_sizes)
+
+        # Output layer
+        self.output_layer = nn.Linear(hidden_sizes[-1], output_size * prediction_horizon)
 
     def forward(self, x):
-        # x shape: (Batch, 1, 41)
-        
-        # CNN Block
-        x = self.p1(self.act1(self.c1(x)))
-        x = self.p2(self.act2(self.c2(x)))
-        x = self.p3(self.act3(self.c3(x)))
-        
-        # 准备 LSTM 输入
-        # 当前 shape: (Batch, 64, 5) -> 需要 (Batch, 5, 64)
-        x = x.permute(0, 2, 1)
-        
-        # LSTM
-        # out: (Batch, Seq_Len, Hidden), (h_n, c_n)
-        # 我们取最后一个时间步的输出作为特征
-        out, (h_n, c_n) = self.lstm(x)
-        # 取最后一个时间步: h_n[-1] 或者 out[:, -1, :]
-        x = out[:, -1, :] 
-        
-        # FC -> BN
-        x = self.fc_act(self.fc1(x))
-        x = self.bn(x)
-        
-        # Output logits
-        x = self.fc_out(x)
-        return x
+        """
+        x: (batch_size, seq_len, input_size)
+        """
+        batch_size, seq_len, _ = x.shape
 
-# ---------------------------------------------------------
-# 3. 训练与验证流程
-# ---------------------------------------------------------
-def train_model():
-    # 1. 准备数据
-    X_train, X_test, y_train, y_test = load_data()
-    if X_train is None: return
-    
-    train_dataset = TEPDataset(X_train, y_train)
-    test_dataset = TEPDataset(X_test, y_test)
-    
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
-    
-    # 2. 初始化模型
-    model = CNNLSTMModel().to(device)
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001) # [cite: 268]
-    
-    # 3. 训练循环
-    epochs = 100
-    train_acc_history = []
-    test_acc_history = []
-    
-    print("\n🚀 开始训练...")
-    
-    for epoch in range(epochs):
-        model.train()
-        running_loss = 0.0
-        correct_train = 0
-        total_train = 0
-        
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            
+        # Initialize states
+        h_states = [torch.zeros(batch_size, hs, device=x.device) for hs in self.hidden_sizes]
+        c_states = [torch.zeros(batch_size, hs, device=x.device) for hs in self.hidden_sizes]
+        s_states = [torch.zeros(batch_size, device=x.device) for _ in range(self.num_layers)]
+
+        # Process sequence
+        h_list = [[] for _ in range(self.num_layers)]
+
+        for t in range(seq_len):
+            x_t = x[:, t, :]  # (batch_size, input_size)
+
+            # Process each layer (top-down for multirate structure)
+            for k in reversed(range(self.num_layers)):
+                h_prev = h_states[k]
+                c_prev = c_states[k]
+                s_prev = s_states[k]
+
+                h_lower = h_states[k - 1] if k > 0 else None
+                h_higher = h_states[k + 1] if k < self.num_layers - 1 else None
+
+                s_lower = s_states[k - 1] if k > 0 else None
+
+                # Input for current layer (only lowest layer gets input)
+                x_k = x_t if k == 0 else None
+
+                # Forward pass through cell
+                h_k, c_k, s_k = self.cells[k](
+                    h_prev, c_prev, h_lower, h_higher, x_k, s_prev, s_lower
+                )
+
+                h_states[k] = h_k
+                c_states[k] = c_k
+                s_states[k] = s_k
+
+            # Store hidden states for each layer at this time step
+            for k in range(self.num_layers):
+                h_list[k].append(h_states[k])
+
+        # Transpose to get [time_steps, batch_size, hidden_size] for each layer
+        h_list = [torch.stack(h, dim=0) for h in h_list]
+
+        # Get final hidden states for HSE
+        final_states = [h[-1] for h in h_list]
+
+        # Apply HSE
+        e = self.hse(final_states)
+
+        # Predict future
+        predictions = self.output_layer(e)
+        predictions = predictions.view(batch_size, self.prediction_horizon, self.output_size)
+
+        return predictions
+
+
+def load_and_preprocess_data(csv_path, n_train=1500):
+    """Load and preprocess TEP dataset"""
+    # Load data
+    df = pd.read_csv(csv_path)
+
+    # Separate train (normal) and test data
+    train_df = df.iloc[:n_train].copy()
+    test_df = df.iloc[n_train:].copy()
+
+    # Get feature columns (exclude faultNumber, simulationRun, sample)
+    feature_cols = [c for c in df.columns if c not in ['faultNumber', 'simulationRun', 'sample']]
+
+    # Handle NaN values - forward fill then backward fill
+    for col in feature_cols:
+        train_df[col] = train_df[col].ffill().bfill()
+        test_df[col] = test_df[col].ffill().bfill()
+
+    # If still NaN, fill with column mean
+    for col in feature_cols:
+        mean_val = train_df[col].mean()
+        if pd.isna(mean_val):
+            mean_val = 0
+        train_df[col] = train_df[col].fillna(mean_val)
+        test_df[col] = test_df[col].fillna(mean_val)
+
+    # Normalize to [0, 1] using train statistics
+    scaler = MinMaxScaler()
+    train_df[feature_cols] = scaler.fit_transform(train_df[feature_cols])
+    test_df[feature_cols] = scaler.transform(test_df[feature_cols])
+
+    return train_df, test_df, feature_cols, scaler
+
+
+def train_model(model, train_loader, num_epochs=50, lr=0.001, device='cpu'):
+    """Train the MRA-LSTM model"""
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+
+    model.train()
+    losses = []
+
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        for batch_idx, (x, y, _) in enumerate(train_loader):
+            x, y = x.to(device), y.to(device)
+
             optimizer.zero_grad()
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-            
-            running_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total_train += labels.size(0)
-            correct_train += (predicted == labels).sum().item()
-            
-        train_acc = 100 * correct_train / total_train
-        train_acc_history.append(train_acc)
-        
-        # 验证
-        model.eval()
-        correct_test = 0
-        total_test = 0
-        with torch.no_grad():
-            for inputs, labels in test_loader:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                _, predicted = torch.max(outputs.data, 1)
-                total_test += labels.size(0)
-                correct_test += (predicted == labels).sum().item()
-        
-        test_acc = 100 * correct_test / total_test
-        test_acc_history.append(test_acc)
-        
-        print(f"Epoch [{epoch+1}/{epochs}] "
-              f"Loss: {running_loss/len(train_loader):.4f} | "
-              f"Train Acc: {train_acc:.2f}% | Test Acc: {test_acc:.2f}%")
+            predictions = model(x)
 
-    print("🎉 训练完成！")
-    
-    # 4. 绘图
-    plt.figure(figsize=(10, 5))
-    plt.plot(train_acc_history, label='Train Accuracy')
-    plt.plot(test_acc_history, label='Test Accuracy')
-    plt.title('PyTorch CNN-LSTM Fault Diagnosis')
-    plt.xlabel('Epoch')
-    plt.ylabel('Accuracy (%)')
-    plt.legend()
+            # Reshape predictions and targets
+            batch_size = x.size(0)
+            predictions = predictions.view(batch_size, -1)
+            y = y.view(batch_size, -1)
+
+            loss = criterion(predictions, y)
+            loss.backward()
+
+            # Gradient clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            optimizer.step()
+            epoch_loss += loss.item()
+
+        scheduler.step()
+        avg_loss = epoch_loss / len(train_loader)
+        losses.append(avg_loss)
+
+        if epoch % 10 == 0:
+            print(f'Epoch [{epoch}/{num_epochs}], Loss: {avg_loss:.6f}')
+
+    return losses
+
+
+def compute_anomaly_scores(model, test_loader, device='cpu'):
+    """Compute anomaly scores (reconstruction errors) for test data"""
+    model.eval()
+    criterion = nn.MSELoss(reduction='none')
+
+    all_errors = []
+    all_labels = []
+    all_predictions = []
+    all_targets = []
+
+    with torch.no_grad():
+        for x, y, labels in test_loader:
+            x, y = x.to(device), y.to(device)
+
+            predictions = model(x)
+
+            # Compute error for each sample
+            batch_size = x.size(0)
+            predictions = predictions.view(batch_size, -1)
+            y = y.view(batch_size, -1)
+
+            errors = criterion(predictions, y)
+            sample_errors = errors.mean(dim=1)
+
+            all_errors.extend(sample_errors.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+            all_predictions.append(predictions.cpu().numpy())
+            all_targets.append(y.cpu().numpy())
+
+    return np.array(all_errors), np.array(all_labels), np.vstack(all_predictions), np.vstack(all_targets)
+
+
+def compute_anomaly_scores_train(model, train_loader, device='cpu'):
+    """Compute anomaly scores on training data for threshold calculation"""
+    model.eval()
+    criterion = nn.MSELoss(reduction='none')
+
+    all_errors = []
+
+    with torch.no_grad():
+        for x, y, _ in train_loader:
+            x, y = x.to(device), y.to(device)
+
+            predictions = model(x)
+
+            # Compute error for each sample
+            batch_size = x.size(0)
+            predictions = predictions.view(batch_size, -1)
+            y = y.view(batch_size, -1)
+
+            errors = criterion(predictions, y)
+            sample_errors = errors.mean(dim=1)
+
+            all_errors.extend(sample_errors.cpu().numpy())
+
+    return np.array(all_errors)
+
+
+def apply_ewaf(errors, alpha=0.3):
+    """Apply Exponentially Weighted Average Filter to smooth errors"""
+    smoothed = np.zeros_like(errors)
+    smoothed[0] = errors[0]
+    for i in range(1, len(errors)):
+        smoothed[i] = alpha * errors[i] + (1 - alpha) * smoothed[i - 1]
+    return smoothed
+
+
+def compute_threshold_static(errors, percentile=95):
+    """Compute static threshold based on percentile"""
+    return np.percentile(errors, percentile)
+
+
+def evaluate_detection(errors, labels, threshold):
+    """Evaluate anomaly detection performance"""
+    predictions = (errors > threshold).astype(int)
+    true_labels = (labels > 0).astype(int)
+
+    TP = np.sum((predictions == 1) & (true_labels == 1))
+    TN = np.sum((predictions == 0) & (true_labels == 0))
+    FP = np.sum((predictions == 1) & (true_labels == 0))
+    FN = np.sum((predictions == 0) & (true_labels == 1))
+
+    accuracy = (TP + TN) / (TP + TN + FP + FN + 1e-10)
+    precision = TP / (TP + FP + 1e-10)
+    recall = TP / (TP + FN + 1e-10)
+    f1 = 2 * precision * recall / (precision + recall + 1e-10)
+    specificity = TN / (TN + FP + 1e-10)
+
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'specificity': specificity,
+        'TP': TP, 'TN': TN, 'FP': FP, 'FN': FN
+    }
+
+
+def plot_anomaly_detection(errors, labels, threshold, save_path='anomaly_detection.png'):
+    """Plot anomaly detection results"""
+    fig, axes = plt.subplots(2, 1, figsize=(15, 8))
+
+    # Plot 1: Error with threshold
+    ax = axes[0]
+    ax.plot(errors, label='Reconstruction Error', color='blue', alpha=0.7)
+    ax.axhline(y=threshold, color='red', linestyle='--', label=f'Threshold = {threshold:.4f}')
+    ax.set_xlabel('Sample Index')
+    ax.set_ylabel('Error')
+    ax.set_title('Anomaly Detection: Reconstruction Error')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    # Highlight anomalies
+    anomalous_indices = np.where(labels > 0)[0]
+    if len(anomalous_indices) > 0:
+        ax.scatter(anomalous_indices, errors[anomalous_indices],
+                  color='orange', marker='x', s=30, label='Fault Samples', zorder=5)
+        ax.legend()
+
+    # Plot 2: Ground truth labels
+    ax = axes[1]
+    true_labels = (labels > 0).astype(int)
+    ax.plot(true_labels, label='Ground Truth (0=Normal, 1=Anomaly)', color='green')
+    ax.set_xlabel('Sample Index')
+    ax.set_ylabel('Label')
+    ax.set_title('Ground Truth Fault Labels')
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+    ax.set_ylim(-0.1, 1.1)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Plot saved to {save_path}")
     plt.show()
 
-if __name__ == "__main__":
-    train_model()
+
+def plot_training_loss(losses, save_path='training_loss.png'):
+    """Plot training loss"""
+    plt.figure(figsize=(10, 5))
+    plt.plot(losses, label='Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('MRA-LSTM Training Loss')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"Training loss plot saved to {save_path}")
+    plt.show()
+
+
+def main():
+    # Set random seeds for reproducibility
+    torch.manual_seed(42)
+    np.random.seed(42)
+
+    # Check if CUDA is available
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Parameters
+    csv_path = '../TEP_3000_Block_Split.csv'
+    n_train = 1500
+    sequence_length = 30
+    prediction_horizon = 1
+    batch_size = 32
+    num_epochs = 50
+    lr = 0.001
+
+    # Load and preprocess data
+    print("Loading and preprocessing data...")
+    train_df, test_df, feature_cols, scaler = load_and_preprocess_data(csv_path, n_train)
+    print(f"Training samples: {len(train_df)}, Test samples: {len(test_df)}")
+    print(f"Number of features: {len(feature_cols)}")
+
+    # Create datasets and dataloaders
+    train_dataset = TEPDataset(train_df, sequence_length, prediction_horizon, training=True)
+    test_dataset = TEPDataset(test_df, sequence_length, prediction_horizon, training=False)
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
+
+    print(f"Training sequences: {len(train_dataset)}, Test sequences: {len(test_dataset)}")
+
+    # Model parameters
+    input_size = len(feature_cols)
+    hidden_sizes = [64, 32]
+    num_layers = len(hidden_sizes)
+    output_size = len(feature_cols)
+
+    # Initialize model
+    print("\nInitializing MRA-LSTM model...")
+    model = MRALSTM(input_size, hidden_sizes, num_layers, output_size, prediction_horizon)
+    model = model.to(device)
+
+    # Print model summary
+    print(f"Model: MRA-LSTM")
+    print(f"Input size: {input_size}")
+    print(f"Hidden sizes: {hidden_sizes}")
+    print(f"Number of layers: {num_layers}")
+    print(f"Output size: {output_size}")
+    print(f"Prediction horizon: {prediction_horizon}")
+
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+
+    # Train model
+    print("\nTraining model...")
+    losses = train_model(model, train_loader, num_epochs, lr, device)
+
+    # Plot training loss
+    plot_training_loss(losses)
+
+    # Compute anomaly scores on training data for threshold calculation
+    print("\nComputing training anomaly scores for threshold...")
+    train_errors = compute_anomaly_scores_train(model, train_loader, device)
+    print(f"Training error stats - mean: {train_errors.mean():.6f}, std: {train_errors.std():.6f}, max: {train_errors.max():.6f}")
+
+    # Compute threshold based on training data (e.g., 95th percentile of training errors)
+    threshold_train = np.percentile(train_errors, 95)
+    print(f"Training-based threshold (95th percentile): {threshold_train:.6f}")
+
+    # Compute anomaly scores on test data
+    print("\nComputing test anomaly scores...")
+    test_errors, labels, predictions, targets = compute_anomaly_scores(model, test_loader, device)
+    print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
+
+    # Apply EWAF to smooth errors
+    smoothed_test_errors = apply_ewaf(test_errors, alpha=0.3)
+
+    # Evaluate detection using training-based threshold
+    metrics = evaluate_detection(smoothed_test_errors, labels, threshold_train)
+    print("\nDetection Performance (using training-based threshold):")
+    print(f"  Accuracy:  {metrics['accuracy']:.4f}")
+    print(f"  Precision: {metrics['precision']:.4f}")
+    print(f"  Recall:    {metrics['recall']:.4f}")
+    print(f"  F1-Score:  {metrics['f1']:.4f}")
+    print(f"  Specificity: {metrics['specificity']:.4f}")
+    print(f"  TP: {metrics['TP']}, TN: {metrics['TN']}, FP: {metrics['FP']}, FN: {metrics['FN']}")
+
+    # Plot anomaly detection results
+    print("\nPlotting anomaly detection results...")
+    plot_anomaly_detection(smoothed_test_errors, labels, threshold_train)
+
+    # Save model
+    torch.save(model.state_dict(), 'mra_lstm_model.pth')
+    print("Model saved to mra_lstm_model.pth")
+
+    return model, test_errors, labels, threshold_train
+
+
+if __name__ == '__main__':
+    model, errors, labels, threshold = main()

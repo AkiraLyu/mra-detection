@@ -17,7 +17,7 @@ def plot_results(y_true, y_pred_prob, y_pred):
     """绘制分类效果可视化图"""
     
     fig = plt.figure(figsize=(16, 12))
-    fig.suptitle('1D-CNN 异常检测分类效果', fontsize=16, fontweight='bold')
+    fig.suptitle('1D-CNN Anomaly Detection', fontsize=16, fontweight='bold')
     gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.4, wspace=0.35)
 
     # ── 1. 混淆矩阵 ──────────────────────────────────────────
