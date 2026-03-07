@@ -13,7 +13,7 @@ import os
 # 1. Dataset Builder (Unchanged)
 # ==========================================
 class TEPDatasetBuilder:
-    def __init__(self, seq_len=60, stride=5):
+    def __init__(self, seq_len=60, stride=1):
         self.seq_len = seq_len
         self.stride = stride
         self.scaler = StandardScaler()
@@ -47,14 +47,44 @@ class TEPDatasetBuilder:
         
         return data.astype(np.float32), mask.astype(np.float32)
 
+#    def create_windows(self, data, mask):
+#        X, M = [], []
+#        if len(data) < self.seq_len:
+#            return np.zeros((0, self.seq_len, 41)), np.zeros((0, self.seq_len, 41))
+#        for i in range(0, len(data) - self.seq_len + 1, self.stride):
+#            X.append(data[i : i + self.seq_len])
+#            M.append(mask[i : i + self.seq_len])
+#        return np.stack(X), np.stack(M)
+
     def create_windows(self, data, mask):
         X, M = [], []
-        if len(data) < self.seq_len:
+        n = len(data)
+        
+        if n == 0:
             return np.zeros((0, self.seq_len, 41)), np.zeros((0, self.seq_len, 41))
-        for i in range(0, len(data) - self.seq_len + 1, self.stride):
-            X.append(data[i : i + self.seq_len])
-            M.append(mask[i : i + self.seq_len])
+    
+        for i in range(0, n, self.stride):
+            if i < self.seq_len:
+                # Front-pad by repeating the first sample
+                pad_len = self.seq_len - i - 1
+                window_data = np.concatenate([
+                    np.tile(data[0:1], (pad_len, 1)),  # repeat first sample
+                    data[0 : i + 1]
+                ], axis=0)
+                window_mask = np.concatenate([
+                    np.tile(mask[0:1], (pad_len, 1)),
+                    mask[0 : i + 1]
+                ], axis=0)
+            else:
+                # Normal lookback: take the previous seq_len samples
+                window_data = data[i - self.seq_len + 1 : i + 1]
+                window_mask = mask[i - self.seq_len + 1 : i + 1]
+    
+            X.append(window_data)
+            M.append(window_mask)
+    
         return np.stack(X), np.stack(M)
+
 
 # ==========================================
 # 2. FIXED: Enhanced Graph Learner
@@ -430,7 +460,8 @@ def train():
             scores.extend((sq_err / obs_cnt).cpu().numpy())
 
     scores = np.array(scores)
-    threshold = np.mean(scores) + 3 * np.std(scores)
+    # threshold = np.mean(scores) + 3 * np.std(scores)
+    threshold = np.mean(scores)
     
     print(f"\nAnomaly Detection Results:")
     print(f"Mean Score: {np.mean(scores):.6f}")
@@ -439,29 +470,44 @@ def train():
     print(f"Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
 
     # Visualization
-    plt.figure(figsize=(12, 5))
+    # plt.figure(figsize=(12, 5))
+    # 
+    # plt.subplot(1, 2, 1)
+    # plt.plot(scores, label='Anomaly Score', alpha=0.7)
+    # plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
+    # plt.xlabel('Sample Index')
+    # plt.ylabel('Reconstruction Error')
+    # plt.title('AGF-ADNet Anomaly Detection (Fixed)')
+    # plt.legend()
+    # plt.grid(True, alpha=0.3)
+    # 
+    # plt.subplot(1, 2, 2)
+    # plt.hist(scores, bins=50, alpha=0.7, edgecolor='black')
+    # plt.axvline(x=threshold, color='r', linestyle='--', label='Threshold')
+    # plt.xlabel('Anomaly Score')
+    # plt.ylabel('Frequency')
+    # plt.title('Score Distribution')
+    # plt.legend()
+    # plt.grid(True, alpha=0.3)
+    # 
+    # plt.tight_layout()
+    # plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
+    # print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
+    # plt.show()
     
-    plt.subplot(1, 2, 1)
+    plt.figure(figsize=(6, 5))
+    
     plt.plot(scores, label='Anomaly Score', alpha=0.7)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
     plt.xlabel('Sample Index')
     plt.ylabel('Reconstruction Error')
-    plt.title('AGF-ADNet Anomaly Detection (Fixed)')
+    plt.title('AGF-ADNet Anomaly Detection')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    
-    plt.subplot(1, 2, 2)
-    plt.hist(scores, bins=50, alpha=0.7, edgecolor='black')
-    plt.axvline(x=threshold, color='r', linestyle='--', label='Threshold')
-    plt.xlabel('Anomaly Score')
-    plt.ylabel('Frequency')
-    plt.title('Score Distribution')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
+   
     plt.tight_layout()
-    plt.savefig('/home/akira/anomaly_detection_results.png', dpi=150)
-    print("\nPlot saved to: /home/claude/anomaly_detection_results.png")
+    plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
+    print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
     plt.show()
     
     return model, scores
