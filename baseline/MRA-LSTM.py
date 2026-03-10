@@ -542,37 +542,30 @@ def evaluate_detection(errors, labels, threshold):
     }
 
 
-def plot_anomaly_detection(errors, labels, threshold, save_path='anomaly_detection.png'):
-    """Plot anomaly detection results"""
-    fig, axes = plt.subplots(2, 1, figsize=(15, 8))
+def plot_anomaly_detection(errors, threshold, save_path='anomaly_detection.png'):
+    """Plot anomaly detection results (reconstruction error + threshold)."""
+    fig, ax = plt.subplots(1, 1, figsize=(15, 4))
 
-    # Plot 1: Error with threshold
-    ax = axes[0]
     ax.plot(errors, label='Reconstruction Error', color='blue', alpha=0.7)
     ax.axhline(y=threshold, color='red', linestyle='--', label=f'Threshold = {threshold:.4f}')
+
+    detected_indices = np.where(errors > threshold)[0]
+    if len(detected_indices) > 0:
+        ax.scatter(
+            detected_indices,
+            errors[detected_indices],
+            color='orange',
+            marker='x',
+            s=30,
+            label='Detected Anomalies',
+            zorder=5,
+        )
+
     ax.set_xlabel('Sample Index')
     ax.set_ylabel('Error')
     ax.set_title('Anomaly Detection: Reconstruction Error')
     ax.legend()
     ax.grid(True, alpha=0.3)
-
-    # Highlight anomalies
-    anomalous_indices = np.where(labels > 0)[0]
-    if len(anomalous_indices) > 0:
-        ax.scatter(anomalous_indices, errors[anomalous_indices],
-                  color='orange', marker='x', s=30, label='Fault Samples', zorder=5)
-        ax.legend()
-
-    # Plot 2: Ground truth labels
-    ax = axes[1]
-    true_labels = (labels > 0).astype(int)
-    ax.plot(true_labels, label='Ground Truth (0=Normal, 1=Anomaly)', color='green')
-    ax.set_xlabel('Sample Index')
-    ax.set_ylabel('Label')
-    ax.set_title('Ground Truth Fault Labels')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(-0.1, 1.1)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
@@ -589,8 +582,8 @@ def plot_training_loss(losses, save_path='training_loss.png'):
     plt.title('MRA-LSTM Training Loss')
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Training loss plot saved to {save_path}")
+    # plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    # print(f"Training loss plot saved to {save_path}")
     plt.show()
 
 
@@ -688,7 +681,7 @@ def main():
 
     # Plot anomaly detection results
     print("\nPlotting anomaly detection results...")
-    plot_anomaly_detection(smoothed_test_errors, labels, threshold_train)
+    plot_anomaly_detection(smoothed_test_errors, threshold_train)
 
     # Save model
     torch.save(model.state_dict(), 'mra_lstm_model.pth')
