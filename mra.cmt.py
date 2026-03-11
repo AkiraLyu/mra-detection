@@ -52,6 +52,7 @@ class TEPDatasetBuilder:
         # 返回 float32，便于 PyTorch 使用。
         return data_scaled.astype(np.float32), mask
 
+    # 在找不到数据集时生成数据
     def _generate_mock_data(self):
         # 合成时间轴。
         t = np.linspace(0, 10, 3000)
@@ -76,16 +77,6 @@ class TEPDatasetBuilder:
         
         # 返回 float32 以兼容模型输入。
         return data.astype(np.float32), mask.astype(np.float32)
-
-#    旧版 create_windows 实现（保留作参考）：
-#    def create_windows(self, data, mask):
-#        X, M = [], []
-#        if len(data) < self.seq_len:
-#            return np.zeros((0, self.seq_len, 41)), np.zeros((0, self.seq_len, 41))
-#        for i in range(0, len(data) - self.seq_len + 1, self.stride):
-#            X.append(data[i : i + self.seq_len])
-#            M.append(mask[i : i + self.seq_len])
-#        return np.stack(X), np.stack(M)
 
     def create_windows(self, data, mask):
         # 保存数据窗口及对应掩码窗口。
@@ -426,7 +417,7 @@ def dual_domain_loss(x_rec, x_true, mask, adj, freq_weight=0.1, sparsity_weight=
     with torch.no_grad():
         # 筛选观测比例足够高的样本。
         obs_ratio = mask.mean(dim=[1, 2])  # (B,)
-        valid_samples = obs_ratio > 0.5  # 仅使用观测比例 >50% 的样本
+        valid_samples = obs_ratio > 0.1  # 仅使用观测比例 >50% 的样本
     
     if valid_samples.sum() > 0:
         x_rec_valid = x_rec[valid_samples].permute(0, 2, 1)  # (B', N, S)
@@ -573,32 +564,6 @@ def train():
     print(f"Threshold (mean + 3*std): {threshold:.6f}")
     print(f"Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
 
-    # 可视化。
-    # plt.figure(figsize=(12, 5))  # 大图布局示例
-    # 
-    # plt.subplot(1, 2, 1)
-    # plt.plot(scores, label='Anomaly Score', alpha=0.7)  # 异常分数曲线
-    # plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')  # 阈值线
-    # plt.xlabel('Sample Index')  # X 轴：样本索引
-    # plt.ylabel('Reconstruction Error')  # Y 轴：重建误差
-    # plt.title('AGF-ADNet Anomaly Detection (Fixed)')  # 标题
-    # plt.legend()
-    # plt.grid(True, alpha=0.3)
-    # 
-    # plt.subplot(1, 2, 2)
-    # plt.hist(scores, bins=50, alpha=0.7, edgecolor='black')  # 分数直方图
-    # plt.axvline(x=threshold, color='r', linestyle='--', label='Threshold')  # 阈值竖线
-    # plt.xlabel('Anomaly Score')  # X 轴：异常分数
-    # plt.ylabel('Frequency')  # Y 轴：频次
-    # plt.title('Score Distribution')  # 标题：分数分布
-    # plt.legend()
-    # plt.grid(True, alpha=0.3)
-    # 
-    # plt.tight_layout()
-    # plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
-    # print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
-    # plt.show()
-    
     plt.figure(figsize=(6, 5))
     
     # 绘制异常分数曲线。
