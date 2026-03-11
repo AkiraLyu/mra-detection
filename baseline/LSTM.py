@@ -47,9 +47,10 @@ if raw_data is not None:
 
     # --- 划分训练集和测试集 ---
     # 前 1500 个是正常数据 (用于训练)
-    train_data_raw = raw_data[:1500] 
-    # 全部数据用于测试 (观察后 1500 个是否报警)
-    test_data_raw = raw_data 
+    SPLIT_INDEX = 1500
+    train_data_raw = raw_data[:SPLIT_INDEX]
+    # 后 1500 个作为测试集 (仅用于测试/可视化)
+    test_data_raw = raw_data[SPLIT_INDEX:]
 
     # --- 归一化---
     scaler = MinMaxScaler()
@@ -154,37 +155,39 @@ if raw_data is not None:
 if raw_data is not None:
     model.eval()
     with torch.no_grad():
-        test_tensor = test_tensor.to(device)
-        predictions = model(test_tensor)
-        
-        # 计算每个样本的重构误差 (MSE)
-        # shape: (Samples, Seq_Len, Features) -> mean over axis 1 and 2
-        loss_dist = torch.mean((predictions - test_tensor) ** 2, dim=[1, 2]).cpu().numpy()
+        train_tensor_eval = train_tensor.to(device)
+        train_predictions = model(train_tensor_eval)
+        # 计算训练集每个样本的重构误差 (MSE)
+        train_loss_dist = torch.mean(
+            (train_predictions - train_tensor_eval) ** 2, dim=[1, 2]
+        ).cpu().numpy()
+
+        test_tensor_eval = test_tensor.to(device)
+        test_predictions = model(test_tensor_eval)
+        # 计算测试集每个样本的重构误差 (MSE)
+        test_loss_dist = torch.mean(
+            (test_predictions - test_tensor_eval) ** 2, dim=[1, 2]
+        ).cpu().numpy()
 
     # --- 设定阈值 ---
-    # 我们看前 1500 个样本（也就是正常部分）的误差分布
-    # 注意：由于滑动窗口，数据点会少 seq_length 个
-    split_point = 1500 - SEQ_LENGTH + 1
-    
-    normal_losses = loss_dist[:split_point]
-    abnormal_losses = loss_dist[split_point:]
-    
+    # 使用训练集（正常数据）的误差分布设定阈值
     # 简单的阈值策略：均值 + 3倍标准差
-    threshold = np.mean(normal_losses) + 3 * np.std(normal_losses)
+    threshold = np.mean(train_loss_dist) + 3 * np.std(train_loss_dist)
     
     print(f"\n计算出的异常阈值: {threshold:.6f}")
     
     # --- 判定 ---
-    anomalies = loss_dist > threshold
+    anomalies = test_loss_dist > threshold
     print(f"检测到的异常数量: {np.sum(anomalies)}")
     
     # --- 可视化结果 ---
     plt.figure(figsize=(12, 6))
-    plt.plot(loss_dist, label='Reconstruction Error')
+    # 仅显示后 1500 个样本的测试结果，横轴从 0 计数
+    test_index = np.arange(len(test_loss_dist))
+    plt.plot(test_index, test_loss_dist, label='Reconstruction Error (Test Only)')
     plt.axhline(y=threshold, color='r', linestyle='--', label='Threshold')
-    plt.axvline(x=split_point, color='g', linestyle='-', label='True Anomaly Start')
-    plt.title('Anomaly Detection using LSTM Autoencoder (TEP Data)')
-    plt.xlabel('Sample Index')
+    plt.title('Anomaly Detection using LSTM Autoencoder (Test Data Only)')
+    plt.xlabel('Sample Index (Test)')
     plt.ylabel('MSE Loss')
     plt.legend()
     plt.show()
