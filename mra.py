@@ -431,11 +431,35 @@ def train():
         if (epoch + 1) % 10 == 0:
             print(f"Epoch {epoch+1}, Loss: {avg_loss:.6f}, LR: {opt.param_groups[0]['lr']:.6f}")
 
-    print("\nTraining completed. Evaluating on test set...")
+    print("\nTraining completed. Computing threshold from training set...")
     
-    # Evaluation
+    # Compute anomaly scores on the TRAINING set to establish the threshold
     model.eval()
-    scores = []
+    train_scores = []
+    with torch.no_grad():
+        train_eval_loader = DataLoader(
+            TensorDataset(torch.tensor(Xtr), torch.tensor(Mtr)),
+            batch_size=32
+        )
+        for x, m in train_eval_loader:
+            x, m = x.to(device), m.to(device)
+            xr, _, _ = model(x, m)
+            
+            sq_err = ((xr - x) * m).pow(2).sum(dim=[1, 2])
+            obs_cnt = m.sum(dim=[1, 2]).clamp_min(1e-8)
+            train_scores.extend((sq_err / obs_cnt).cpu().numpy())
+
+    train_scores = np.array(train_scores)
+    threshold = np.mean(train_scores) + 3 * np.std(train_scores)
+    
+    print(f"\nTraining Set Score Stats:")
+    print(f"  Mean: {np.mean(train_scores):.6f}")
+    print(f"  Std:  {np.std(train_scores):.6f}")
+    print(f"  Threshold (mean + 3*std): {threshold:.6f}")
+    
+    # Evaluate on the TEST set using the training-derived threshold
+    print("\nEvaluating on test set...")
+    test_scores = []
     with torch.no_grad():
         test_loader = DataLoader(
             TensorDataset(torch.tensor(Xte), torch.tensor(Mte)), 
@@ -445,20 +469,17 @@ def train():
             x, m = x.to(device), m.to(device)
             xr, _, _ = model(x, m)
             
-            # Anomaly Score: MSE on observed data
             sq_err = ((xr - x) * m).pow(2).sum(dim=[1, 2])
             obs_cnt = m.sum(dim=[1, 2]).clamp_min(1e-8)
-            scores.extend((sq_err / obs_cnt).cpu().numpy())
+            test_scores.extend((sq_err / obs_cnt).cpu().numpy())
 
-    scores = np.array(scores)
-    # threshold = np.mean(scores) + 3 * np.std(scores)
-    threshold = np.mean(scores)
+    scores = np.array(test_scores)
     
-    print(f"\nAnomaly Detection Results:")
-    print(f"Mean Score: {np.mean(scores):.6f}")
-    print(f"Std Score: {np.std(scores):.6f}")
-    print(f"Threshold (mean + 3*std): {threshold:.6f}")
-    print(f"Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
+    print(f"\nAnomaly Detection Results (Test Set):")
+    print(f"  Mean Score: {np.mean(scores):.6f}")
+    print(f"  Std Score:  {np.std(scores):.6f}")
+    print(f"  Threshold (from train): {threshold:.6f}")
+    print(f"  Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
 
     # Visualization
     plt.figure(figsize=(6, 5))

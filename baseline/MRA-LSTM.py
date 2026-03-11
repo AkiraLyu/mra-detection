@@ -542,34 +542,20 @@ def evaluate_detection(errors, labels, threshold):
     }
 
 
-def plot_anomaly_detection(errors, threshold, save_path='anomaly_detection.png'):
-    """Plot anomaly detection results (reconstruction error + threshold)."""
-    fig, ax = plt.subplots(1, 1, figsize=(15, 4))
-
-    ax.plot(errors, label='Reconstruction Error', color='blue', alpha=0.7)
-    ax.axhline(y=threshold, color='red', linestyle='--', label=f'Threshold = {threshold:.4f}')
-
-    detected_indices = np.where(errors > threshold)[0]
-    if len(detected_indices) > 0:
-        ax.scatter(
-            detected_indices,
-            errors[detected_indices],
-            color='orange',
-            marker='x',
-            s=30,
-            label='Detected Anomalies',
-            zorder=5,
-        )
-
-    ax.set_xlabel('Sample Index')
-    ax.set_ylabel('Error')
-    ax.set_title('Anomaly Detection: Reconstruction Error')
-    ax.legend()
-    ax.grid(True, alpha=0.3)
+def plot_anomaly_detection(errors, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
+    """Plot anomaly detection results (reconstruction error + threshold) in mra.py style."""
+    plt.figure(figsize=(6, 5))
+    plt.plot(errors, label='Anomaly Score', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
+    plt.xlabel('Sample Index')
+    plt.ylabel('Reconstruction Error')
+    plt.title('MRA-LSTM Anomaly Detection')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Plot saved to {save_path}")
+    plt.savefig(save_path, dpi=150)
+    print(f"\nPlot saved to: {save_path}")
     plt.show()
 
 

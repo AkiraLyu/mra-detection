@@ -180,16 +180,18 @@ if raw_data is not None:
     anomalies = test_loss_dist > threshold
     print(f"检测到的异常数量: {np.sum(anomalies)}")
     
-    # --- 可视化结果 ---
-    plt.figure(figsize=(12, 6))
-    # 仅显示后 1500 个样本的测试结果，横轴从 0 计数
-    test_index = np.arange(len(test_loss_dist))
-    plt.plot(test_index, test_loss_dist, label='Reconstruction Error (Test Only)')
-    plt.axhline(y=threshold, color='r', linestyle='--', label='Threshold')
-    plt.title('Anomaly Detection using LSTM Autoencoder (Test Data Only)')
-    plt.xlabel('Sample Index (Test)')
-    plt.ylabel('MSE Loss')
+    # --- 可视化结果 (match mra.py style exactly) ---
+    scores = test_loss_dist
+    plt.figure(figsize=(6, 5))
+    plt.plot(scores, label='Anomaly Score', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
+    plt.xlabel('Sample Index')
+    plt.ylabel('Reconstruction Error')
+    plt.title('LSTM Anomaly Detection')
     plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
+    print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
     plt.show()
-    
-    print("图表已生成")

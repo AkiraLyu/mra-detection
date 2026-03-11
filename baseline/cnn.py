@@ -21,143 +21,22 @@ def plot_results(
     train_scores=None,
     output_pdf="anomaly_detection_results.pdf",
 ):
-    """绘制异常检测可视化图（每页一个 figure，保存为多页 PDF）"""
-    y_true = np.asarray(y_true).flatten().astype(int)
-    y_pred = np.asarray(y_pred).flatten().astype(int)
+    """绘制异常检测可视化图（与 mra.py 完全一致）"""
     anomaly_scores = np.asarray(anomaly_scores).flatten()
-    if train_scores is not None:
-        train_scores = np.asarray(train_scores).flatten()
 
-    figures = []
+    plt.figure(figsize=(6, 5))
+    plt.plot(anomaly_scores, label='Anomaly Score', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
+    plt.xlabel('Sample Index')
+    plt.ylabel('Reconstruction Error')
+    plt.title('CNN Anomaly Detection')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
 
-    # ── 1. 混淆矩阵 ──────────────────────────────────────────
-    fig1, ax1 = plt.subplots(figsize=(7, 6))
-    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        xticklabels=["Normal", "Anomaly"],
-        yticklabels=["Normal", "Anomaly"],
-        ax=ax1,
-    )
-    ax1.set_xlabel("Predicted Label")
-    ax1.set_ylabel("True Label")
-    ax1.set_title("Confusion Matrix")
-    fig1.suptitle("CNN Autoencoder Anomaly Detection", fontsize=14, fontweight="bold")
-    fig1.tight_layout()
-    figures.append(fig1)
-
-    # ── 2. 样本异常分数散点图（按索引顺序） ──────────────────
-    fig2, ax2 = plt.subplots(figsize=(10, 6))
-    indices = np.arange(len(y_true))
-    colors = np.where(y_pred == y_true, "steelblue", "tomato")
-    ax2.scatter(indices, anomaly_scores, c=colors, s=8, alpha=0.6)
-    ax2.axhline(
-        y=threshold,
-        color="black",
-        linestyle="--",
-        lw=1.5,
-        label=f"Threshold={threshold:.6f}",
-    )
-    ax2.set_xlabel("Sample Index (Test Set)")
-    ax2.set_ylabel("Reconstruction Error")
-    ax2.set_title("Per-Sample Anomaly Score (Blue=Correct, Red=Misclassified)")
-    ax2.legend()
-    fig2.suptitle("CNN Autoencoder Anomaly Detection", fontsize=14, fontweight="bold")
-    fig2.tight_layout()
-    figures.append(fig2)
-
-    # ── 3. 异常分数分布 ──────────────────────────────────────
-    fig3, ax3 = plt.subplots(figsize=(7, 6))
-    if train_scores is not None and len(train_scores) > 0:
-        ax3.hist(train_scores, bins=30, alpha=0.6, color="steelblue", label="Train (Normal)")
-
-    test_normal = anomaly_scores[y_true == 0]
-    test_anomaly = anomaly_scores[y_true == 1]
-    if len(test_normal) > 0:
-        ax3.hist(test_normal, bins=30, alpha=0.6, color="royalblue", label="Test Normal")
-    if len(test_anomaly) > 0:
-        ax3.hist(test_anomaly, bins=30, alpha=0.6, color="tomato", label="Test Anomaly")
-
-    ax3.axvline(x=threshold, color="black", linestyle="--", lw=1.5, label="Threshold")
-    ax3.set_xlabel("Reconstruction Error")
-    ax3.set_ylabel("Count")
-    ax3.set_title("Anomaly Score Distribution")
-    ax3.legend()
-    fig3.suptitle("CNN Autoencoder Anomaly Detection", fontsize=14, fontweight="bold")
-    fig3.tight_layout()
-    figures.append(fig3)
-
-    # ── 4. 准确率 / Precision / Recall / F1 / AUC ───────────
-    fig4, ax4 = plt.subplots(figsize=(7, 6))
-    from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
-
-    metrics = {
-        "Accuracy": accuracy_score(y_true, y_pred),
-        "Precision": precision_score(y_true, y_pred, zero_division=0),
-        "Recall": recall_score(y_true, y_pred, zero_division=0),
-        "F1-Score": f1_score(y_true, y_pred, zero_division=0),
-    }
-
-    roc_title = None
-    unique_test_labels = np.unique(y_true)
-    if len(unique_test_labels) >= 2:
-        fpr, tpr, _ = roc_curve(y_true, anomaly_scores)
-        roc_auc = auc(fpr, tpr)
-        metrics["AUC"] = roc_auc
-        roc_title = "ROC Curve (Test)"
-    elif train_scores is not None and len(train_scores) > 0:
-        y_combined = np.concatenate([np.zeros_like(train_scores, dtype=int), y_true])
-        score_combined = np.concatenate([train_scores, anomaly_scores])
-        fpr, tpr, _ = roc_curve(y_combined, score_combined)
-        roc_auc = auc(fpr, tpr)
-        metrics["AUC"] = roc_auc
-        roc_title = "ROC Curve (Train Normal vs Test)"
-
-    base_colors = ["steelblue", "mediumseagreen", "goldenrod", "coral", "mediumpurple"]
-    colors = base_colors[: len(metrics)]
-    bars = ax4.bar(metrics.keys(), metrics.values(), color=colors)
-    ax4.set_ylim(0, 1.1)
-    ax4.set_ylabel("Score")
-    ax4.set_title("Overall Metrics")
-    for bar, val in zip(bars, metrics.values()):
-        ax4.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.02,
-            f"{val:.3f}",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-    fig4.suptitle("CNN Autoencoder Anomaly Detection", fontsize=14, fontweight="bold")
-    fig4.tight_layout()
-    figures.append(fig4)
-
-    # ── 5. ROC 曲线（如可计算） ───────────────────────────────
-    if roc_title is not None:
-        fig5, ax5 = plt.subplots(figsize=(7, 6))
-        ax5.plot(fpr, tpr, color="darkorange", lw=2, label=f"ROC Curve (AUC = {roc_auc:.4f})")
-        ax5.plot([0, 1], [0, 1], color="navy", lw=1, linestyle="--", label="Random")
-        ax5.set_xlim([0.0, 1.0])
-        ax5.set_ylim([0.0, 1.05])
-        ax5.set_xlabel("False Positive Rate")
-        ax5.set_ylabel("True Positive Rate")
-        ax5.set_title(roc_title)
-        ax5.legend(loc="lower right")
-        fig5.suptitle("CNN Autoencoder Anomaly Detection", fontsize=14, fontweight="bold")
-        fig5.tight_layout()
-        figures.append(fig5)
-
-    with PdfPages(output_pdf) as pdf:
-        for fig in figures:
-            pdf.savefig(fig, dpi=150, bbox_inches="tight")
-
+    plt.tight_layout()
+    plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
+    print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
     plt.show()
-    for fig in figures:
-        plt.close(fig)
-    print(f"图表已保存至 {output_pdf}")
 
 """
 读取原始数据并生成掩码矩阵
