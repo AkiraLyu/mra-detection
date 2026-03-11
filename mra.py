@@ -6,6 +6,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 import os
 
@@ -480,6 +481,22 @@ def train():
     print(f"  Std Score:  {np.std(scores):.6f}")
     print(f"  Threshold (from train): {threshold:.6f}")
     print(f"  Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
+
+    # Classification Metrics
+    # Ground truth: all test samples are anomalous (label=1)
+    y_true = np.ones(len(scores), dtype=int)
+    y_pred = (scores > threshold).astype(int)
+
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+
+    print(f"\nClassification Metrics:")
+    print(f"  Accuracy:  {acc:.4f}")
+    print(f"  Precision: {prec:.4f}")
+    print(f"  Recall:    {rec:.4f}")
+    print(f"  F1-Score:  {f1:.4f}")
 
     # Visualization
     plt.figure(figsize=(6, 5))

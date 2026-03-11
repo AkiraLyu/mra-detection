@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 
 # ==========================================
@@ -179,6 +180,22 @@ if raw_data is not None:
     # --- 判定 ---
     anomalies = test_loss_dist > threshold
     print(f"检测到的异常数量: {np.sum(anomalies)}")
+
+    # Classification Metrics
+    # Ground truth: all test sequences are anomalous (label=1)
+    y_true = np.ones(len(test_loss_dist), dtype=int)
+    y_pred = anomalies.astype(int)
+
+    acc = accuracy_score(y_true, y_pred)
+    prec = precision_score(y_true, y_pred, zero_division=0)
+    rec = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
+
+    print(f"\nClassification Metrics:")
+    print(f"  Accuracy:  {acc:.4f}")
+    print(f"  Precision: {prec:.4f}")
+    print(f"  Recall:    {rec:.4f}")
+    print(f"  F1-Score:  {f1:.4f}")
     
     # --- 可视化结果 (match mra.py style exactly) ---
     scores = test_loss_dist
