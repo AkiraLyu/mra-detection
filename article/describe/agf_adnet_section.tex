@@ -1,0 +1,363 @@
+% ============================================================
+% AGF-ADNet 模型与算法描述
+% 说明：主文件（独立编译版本），使用 XeLaTeX 编译。
+% ============================================================
+
+\documentclass[UTF8]{ctexart}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{xeCJK}
+
+\begin{document}
+
+\section{AGF-ADNet 模型与算法}
+
+\subsection{方法概述}
+
+本研究提出一种面向工业过程异常检测的自适应图--频率融合异常检测网络（Adaptive Graph-Frequency Anomaly Detection Network，AGF-ADNet）。该模型以多变量时间序列的重构误差作为异常评分依据，核心思想是：正常模式下模型能够精确重构输入信号，而异常样本因偏离已学习的正常分布而产生较大的重构误差。
+
+AGF-ADNet 包含以下关键组件：
+\begin{enumerate}
+    \item \textbf{自适应图学习模块（GraphLearner）}：自动学习变量间的依赖关系，生成稀疏邻接矩阵；
+    \item \textbf{时域分支}：由图卷积网络（GCN）和多尺度时序卷积网络（Multi-Scale TCN）组成，分别捕获变量间空间依赖和多尺度时序模式；
+    \item \textbf{频域分支（FrequencyImputer）}：在频域中通过注意力机制增强信号的频率特征；
+    \item \textbf{门控融合模块（GatedFusion）}：自适应地融合时域与频域分支的输出；
+    \item \textbf{Transformer 重构器}：基于自注意力机制对融合后的表示进行全局时序建模与信号重构。
+\end{enumerate}
+
+模型采用自监督学习范式训练：在训练阶段对已观测数据随机掩码，迫使模型学习恢复被掩盖的信号，从而建立正常模式的内在表示。
+
+% ============================================================
+\subsection{模型架构}
+
+设输入多变量时间序列为 $\mathbf{X} \in \mathbb{R}^{B \times S \times N}$，其中 $B$ 为批量大小，$S$ 为时间窗口长度（默认 $S=60$），$N$ 为变量个数（默认 $N=41$）。对应的观测掩码为 $\mathbf{M} \in \{0,1\}^{B \times S \times N}$，其中 $M_{b,s,n}=1$ 表示该位置的值已被观测。
+
+模型的整体前向传播可概括为：
+\begin{equation}
+    \hat{\mathbf{X}}, \mathbf{A}, \tilde{\mathbf{X}} = \mathrm{AGF\text{-}ADNet}(\mathbf{X}, \mathbf{M})
+\end{equation}
+其中 $\hat{\mathbf{X}} \in \mathbb{R}^{B \times S \times N}$ 为重构输出，$\mathbf{A} \in \mathbb{R}^{N \times N}$ 为学习到的邻接矩阵，$\tilde{\mathbf{X}}$ 为插补中间结果。
+
+% ============================================================
+\subsection{模块分析}
+
+% ------------------------------------------------------------
+\subsubsection{数据预处理模块（TEPDatasetBuilder）}
+
+该模块负责从 CSV 文件中加载田纳西-伊斯曼过程（Tennessee Eastman Process, TEP）数据集，并进行预处理。
+
+\paragraph{输入与输出。}
+输入为原始 CSV 文件路径，输出为标准化后的数据矩阵 $\mathbf{D} \in \mathbb{R}^{T \times N}$ 及相应的观测掩码 $\mathbf{M} \in \{0,1\}^{T \times N}$，其中 $T$ 为总时间步数。
+
+\paragraph{处理流程。}
+\begin{enumerate}
+    \item 提取以 \texttt{xmeas\_} 为前缀的 $N=41$ 个测量变量；
+    \item 构建缺失值掩码：$M_{t,n} = \mathbf{1}[D_{t,n} \text{ 非缺失}]$；
+    \item 缺失值填零：$D_{t,n} \leftarrow D_{t,n} \cdot M_{t,n}$；
+    \item 使用前 1500 个样本拟合 StandardScaler，对全部数据执行 Z-score 标准化：
+\end{enumerate}
+\begin{equation}
+    D_{t,n}^{\text{scaled}} = \frac{D_{t,n} - \mu_n}{\sigma_n}
+\end{equation}
+其中 $\mu_n, \sigma_n$ 分别为第 $n$ 个变量在训练集上的均值和标准差。
+
+\paragraph{滑动窗口构造。}
+给定窗口长度 $S$ 和步长 $\delta$（默认 $\delta=1$），对于时间步 $t$，构造回看窗口：
+\begin{equation}
+    \mathbf{X}^{(t)} =
+    \begin{cases}
+        [\underbrace{\mathbf{d}_0, \ldots, \mathbf{d}_0}_{S-t-1}, \mathbf{d}_0, \ldots, \mathbf{d}_t] & \text{若 } t < S \\[6pt]
+        [\mathbf{d}_{t-S+1}, \ldots, \mathbf{d}_t] & \text{若 } t \geq S
+    \end{cases}
+\end{equation}
+其中 $\mathbf{d}_t \in \mathbb{R}^N$ 为第 $t$ 步的特征向量。当 $t < S$ 时，通过复制首样本进行前端填充。
+
+% ------------------------------------------------------------
+\subsubsection{自适应图学习模块（GraphLearner）}
+
+\paragraph{目的。}
+自动学习 $N$ 个过程变量之间的依赖关系图，无需预定义图结构。
+
+\paragraph{输入与输出。}
+无显式输入（参数为可学习的嵌入矩阵），输出为归一化邻接矩阵 $\mathbf{A} \in \mathbb{R}^{N \times N}$。
+
+\paragraph{数学描述。}
+定义两组可学习的节点嵌入 $\mathbf{E}_1, \mathbf{E}_2 \in \mathbb{R}^{N \times d_e}$（$d_e=16$），以及放大因子 $\alpha=3.0$：
+\begin{align}
+    \mathbf{M}_1 &= \tanh(\alpha \, \mathbf{E}_1) \\
+    \mathbf{M}_2 &= \tanh(\alpha \, \mathbf{E}_2) \\
+    \mathbf{A}^{\text{raw}} &= \mathrm{ReLU}\!\left(\mathbf{M}_1 \, \mathbf{M}_2^\top\right)
+\end{align}
+随后进行逐行归一化以获得概率化的邻接矩阵：
+\begin{equation}
+    A_{ij} = \frac{A_{ij}^{\text{raw}}}{\sum_{k=1}^{N} A_{ik}^{\text{raw}} + \epsilon}
+\end{equation}
+其中 $\epsilon = 10^{-8}$ 为数值稳定常数。此设计避免了 softmax 归一化，使得通过 $L_1$ 正则化能够有效促进图的稀疏性。
+
+% ------------------------------------------------------------
+\subsubsection{图卷积层（GCNLayer）}
+
+\paragraph{目的。}
+利用学习到的邻接矩阵 $\mathbf{A}$ 在变量维度上进行信息传播，捕获变量间的空间依赖关系。
+
+\paragraph{输入与输出。}
+输入为 $\mathbf{X} \in \mathbb{R}^{B \times S \times N \times F_{\text{in}}}$（本模型中 $F_{\text{in}}=1$），输出为 $\mathbf{H} \in \mathbb{R}^{B \times S \times N \times F_{\text{out}}}$（$F_{\text{out}}=1$）。
+
+\paragraph{数学描述。}
+\begin{equation}
+    \mathbf{H} = \mathbf{A} \, (\mathbf{X} \, \mathbf{W} + \mathbf{b})
+\end{equation}
+其中 $\mathbf{W} \in \mathbb{R}^{F_{\text{in}} \times F_{\text{out}}}$ 为可学习权重矩阵，$\mathbf{b}$ 为偏置。使用 Einstein 求和约定实现图上的聚合操作：
+\begin{equation}
+    H_{b,s,n,f} = \sum_{m=1}^{N} A_{n,m} \cdot (\mathbf{X} \mathbf{W} + \mathbf{b})_{b,s,m,f}
+\end{equation}
+
+% ------------------------------------------------------------
+\subsubsection{多尺度时序卷积网络（MultiScaleTCN）}
+
+\paragraph{目的。}
+使用不同核大小的深度可分离一维卷积并行提取多尺度时序特征，捕获短期波动和中长期趋势。
+
+\paragraph{输入与输出。}
+输入张量 $\mathbf{X} \in \mathbb{R}^{B \times N \times S}$，输出张量 $\mathbf{Y} \in \mathbb{R}^{B \times N \times S}$。
+
+\paragraph{数学描述。}
+设卷积核集合 $\mathcal{K} = \{k_1, k_2, k_3\} = \{3, 5, 9\}$，则对于每个核大小 $k_j$：
+\begin{equation}
+    \mathbf{Y}^{(j)} = \mathrm{DepthwiseConv1D}_{k_j}\!\left(\mathrm{Pad}(\mathbf{X}, k_j)\right), \quad j = 1, 2, 3
+\end{equation}
+其中 $\mathrm{Pad}(\cdot, k)$ 为对称填充（非因果模式下）以保持序列长度不变。各尺度输出通过可学习权重向量 $\mathbf{w} \in \mathbb{R}^{|\mathcal{K}|}$ 融合：
+\begin{equation}
+    \mathbf{Y} = \sum_{j=1}^{|\mathcal{K}|} w_j \, \mathbf{Y}^{(j)} + b_{\text{fusion}}
+\end{equation}
+即堆叠为 $\mathbf{Y}^{\text{stack}} \in \mathbb{R}^{B \times N \times S \times |\mathcal{K}|}$，通过线性层对最后一维进行加权求和。
+
+% ------------------------------------------------------------
+\subsubsection{频域插补模块（FrequencyImputer）}
+
+\paragraph{目的。}
+在频域中利用注意力机制对信号进行增强与插补，学习哪些频率成分对重构至关重要。
+
+\paragraph{输入与输出。}
+输入 $\mathbf{X} \in \mathbb{R}^{B \times S \times N}$，输出 $\mathbf{X}^{\text{freq}} \in \mathbb{R}^{B \times S \times N}$。
+
+\paragraph{数学描述。}
+首先将输入转置为 $(B, N, S)$ 并执行离散傅里叶变换：
+\begin{equation}
+    \mathbf{X}_f = \mathrm{FFT}(\mathbf{X}) \in \mathbb{C}^{B \times N \times F}, \quad F = \lfloor S/2 \rfloor + 1
+\end{equation}
+将实部与虚部拼接为特征向量：
+\begin{equation}
+    \mathbf{Z} = [\mathrm{Re}(\mathbf{X}_f); \, \mathrm{Im}(\mathbf{X}_f)] \in \mathbb{R}^{B \times N \times 2F}
+\end{equation}
+计算频率注意力权重：
+\begin{equation}
+    \boldsymbol{\alpha} = \sigma\!\left(\mathbf{W}_2^{\text{att}} \, \mathrm{ReLU}\!\left(\mathbf{W}_1^{\text{att}} \, \mathbf{Z} + \mathbf{b}_1^{\text{att}}\right) + \mathbf{b}_2^{\text{att}}\right) \in [0,1]^{B \times N \times F}
+\end{equation}
+其中 $\sigma(\cdot)$ 为 Sigmoid 函数，$\mathbf{W}_1^{\text{att}} \in \mathbb{R}^{128 \times 2F}$，$\mathbf{W}_2^{\text{att}} \in \mathbb{R}^{F \times 128}$。
+
+同时，通过频率增强网络生成增强后的频率表示：
+\begin{equation}
+    \hat{\mathbf{Z}} = \mathbf{W}_2^{\text{enh}} \, \mathrm{ReLU}\!\left(\mathbf{W}_1^{\text{enh}} \, \mathbf{Z} + \mathbf{b}_1^{\text{enh}}\right) + \mathbf{b}_2^{\text{enh}} \in \mathbb{R}^{B \times N \times 2F}
+\end{equation}
+将增强后的实部和虚部分别与注意力权重相乘：
+\begin{align}
+    \hat{R}_f &= \hat{Z}_{[\cdot, \cdot, :F]} \odot \boldsymbol{\alpha} \\
+    \hat{I}_f &= \hat{Z}_{[\cdot, \cdot, F:]} \odot \boldsymbol{\alpha}
+\end{align}
+重构复数频谱并执行逆傅里叶变换：
+\begin{equation}
+    \mathbf{X}^{\text{freq}} = \mathrm{IFFT}\!\left(\hat{R}_f + j \, \hat{I}_f\right) \in \mathbb{R}^{B \times N \times S}
+\end{equation}
+最终转置回 $(B, S, N)$ 维度。
+
+% ------------------------------------------------------------
+\subsubsection{门控融合模块（GatedFusion）}
+
+\paragraph{目的。}
+自适应地融合时域分支输出 $\mathbf{H}^{\text{time}}$ 和频域分支输出 $\mathbf{H}^{\text{freq}}$，使模型能够根据不同时间步动态调节各分支的贡献权重。
+
+\paragraph{输入与输出。}
+输入为 $\mathbf{H}^{\text{time}}, \mathbf{H}^{\text{freq}} \in \mathbb{R}^{B \times S \times N}$，输出为 $\mathbf{H}^{\text{fused}} \in \mathbb{R}^{B \times S \times N}$。
+
+\paragraph{数学描述。}
+首先将两个分支沿变量维度拼接（转置至通道优先格式）：
+\begin{equation}
+    \mathbf{C} = [\mathbf{H}^{\text{time}}; \, \mathbf{H}^{\text{freq}}] \in \mathbb{R}^{B \times 2N \times S}
+\end{equation}
+通过时序卷积门控网络计算门控信号：
+\begin{equation}
+    \mathbf{Z} = \sigma\!\left(\mathrm{Conv1D}_{1 \times 1}\!\left(\mathrm{ReLU}\!\left(\mathrm{Conv1D}_{3}\!\left(\mathbf{C}\right)\right)\right)\right) \in [0,1]^{B \times N \times S}
+\end{equation}
+其中第一层卷积将通道数从 $2N$ 压缩至 64，核大小为 3；第二层 $1\times 1$ 卷积将通道数恢复为 $N$。最终的融合输出为：
+\begin{equation}
+    \mathbf{H}^{\text{fused}} = \mathrm{LayerNorm}\!\left(\mathbf{Z} \odot \mathbf{H}^{\text{time}} + (1 - \mathbf{Z}) \odot \mathbf{H}^{\text{freq}}\right)
+\end{equation}
+
+% ------------------------------------------------------------
+\subsubsection{Transformer 重构器}
+
+\paragraph{目的。}
+利用自注意力机制捕获全局时序依赖关系，对融合后的表示进行最终的信号重构。
+
+\paragraph{输入与输出。}
+输入为插补后的序列 $\mathbf{X}^{\text{filled}} \in \mathbb{R}^{B \times S \times N}$，输出为重构信号 $\hat{\mathbf{X}} \in \mathbb{R}^{B \times S \times N}$。
+
+\paragraph{数学描述。}
+首先通过线性投影和位置编码将输入映射至模型空间：
+\begin{equation}
+    \mathbf{Z}_0 = \mathbf{X}^{\text{filled}} \, \mathbf{W}^{\text{in}} + \mathbf{b}^{\text{in}} + \mathbf{P} \in \mathbb{R}^{B \times S \times d}
+\end{equation}
+其中 $\mathbf{W}^{\text{in}} \in \mathbb{R}^{N \times d}$ 为输入投影矩阵，$d=64$ 为模型维度，$\mathbf{P} \in \mathbb{R}^{1 \times S \times d}$ 为可学习的位置编码。
+
+Transformer 编码器由 $L=2$ 层堆叠而成，每层包含多头自注意力（$h=4$ 头）和前馈网络（隐藏维度 128）：
+\begin{align}
+    \mathbf{Z}_l' &= \mathrm{LayerNorm}\!\left(\mathbf{Z}_{l-1} + \mathrm{MultiHeadAttn}(\mathbf{Z}_{l-1})\right) \\
+    \mathbf{Z}_l &= \mathrm{LayerNorm}\!\left(\mathbf{Z}_l' + \mathrm{FFN}(\mathbf{Z}_l')\right), \quad l = 1, 2
+\end{align}
+最终通过线性投影恢复至变量空间：
+\begin{equation}
+    \hat{\mathbf{X}} = \mathbf{Z}_L \, \mathbf{W}^{\text{out}} + \mathbf{b}^{\text{out}} \in \mathbb{R}^{B \times S \times N}
+\end{equation}
+
+% ============================================================
+\subsection{数据流}
+
+AGF-ADNet 中数据的完整流动过程如下所述。
+
+\subsubsection{输入预处理}
+
+\begin{enumerate}
+    \item 原始 TEP 数据经 Z-score 标准化后，按滑动窗口划分为 $\mathbf{X} \in \mathbb{R}^{B \times S \times N}$；
+    \item 训练阶段引入随机掩码增强：以概率 $p=0.1$ 对已观测位置进行额外掩码，得到输入掩码 $\mathbf{M}^{\text{input}} = \mathbf{M} \odot \mathbf{R}$，其中 $R_{b,s,n} \sim \mathrm{Bernoulli}(1-p)$；
+    \item 输入数据按掩码置零：$\mathbf{X}^{\text{input}} = \mathbf{X} \odot \mathbf{M}^{\text{input}}$。
+\end{enumerate}
+
+\subsubsection{特征变换与分支处理}
+
+\begin{enumerate}
+    \item \textbf{图学习}：GraphLearner 生成邻接矩阵 $\mathbf{A} \in \mathbb{R}^{N \times N}$；
+    \item \textbf{时域分支}：
+    \begin{itemize}
+        \item GCN：$\mathbf{X} \xrightarrow{\text{unsqueeze}} \mathbb{R}^{B \times S \times N \times 1} \xrightarrow{\text{GCN}(\mathbf{A})} \mathbb{R}^{B \times S \times N \times 1} \xrightarrow{\text{squeeze}} \mathbf{H}^{\text{gcn}} \in \mathbb{R}^{B \times S \times N}$，随后经 LayerNorm 归一化；
+        \item TCN：$\mathbf{X} \xrightarrow{\text{permute}} \mathbb{R}^{B \times N \times S} \xrightarrow{\text{MultiScaleTCN}} \mathbb{R}^{B \times N \times S} \xrightarrow{\text{permute}} \mathbf{H}^{\text{tcn}} \in \mathbb{R}^{B \times S \times N}$；
+        \item 残差叠加：$\mathbf{H}^{\text{time}} = \mathbf{H}^{\text{gcn}} + \mathbf{H}^{\text{tcn}}$；
+    \end{itemize}
+    \item \textbf{频域分支}：$\mathbf{X} \xrightarrow{\text{FrequencyImputer}} \mathbf{H}^{\text{freq}} \in \mathbb{R}^{B \times S \times N}$，经 LayerNorm 归一化。
+\end{enumerate}
+
+\subsubsection{融合与重构}
+
+\begin{enumerate}
+    \item \textbf{门控融合}：$\mathbf{H}^{\text{fused}} = \mathrm{GatedFusion}(\mathbf{H}^{\text{time}}, \mathbf{H}^{\text{freq}})$；
+    \item \textbf{缺失值插补}：$\mathbf{X}^{\text{filled}} = \mathbf{X} \odot \mathbf{M} + \mathbf{H}^{\text{fused}} \odot (1 - \mathbf{M})$；
+    \item \textbf{Transformer 重构}：$\hat{\mathbf{X}} = \mathrm{Transformer}(\mathbf{X}^{\text{filled}})$。
+\end{enumerate}
+
+\subsubsection{异常评分与检测}
+
+对于每个测试样本 $t$，异常分数定义为掩码加权的均方重构误差：
+\begin{equation}
+    \mathrm{Score}(t) = \frac{\sum_{s,n} \left(\hat{X}_{s,n}^{(t)} - X_{s,n}^{(t)}\right)^2 \cdot M_{s,n}^{(t)}}{\sum_{s,n} M_{s,n}^{(t)}}
+\end{equation}
+阈值由训练集上的异常分数统计量确定：
+\begin{equation}
+    \tau = \mu_{\text{train}} + 3 \, \sigma_{\text{train}}
+\end{equation}
+若 $\mathrm{Score}(t) > \tau$，则判定样本 $t$ 为异常。
+
+% ============================================================
+\subsection{数学建模}
+
+\subsubsection{输入表示}
+
+设原始时间序列数据矩阵为 $\mathbf{D} \in \mathbb{R}^{T \times N}$，经标准化处理后通过滑动窗口提取得到输入张量。每个窗口样本表示为：
+\begin{equation}
+    \mathbf{X}^{(t)} = \begin{bmatrix} \mathbf{d}_{t-S+1}^\top \\ \mathbf{d}_{t-S+2}^\top \\ \vdots \\ \mathbf{d}_t^\top \end{bmatrix} \in \mathbb{R}^{S \times N}
+\end{equation}
+
+\subsubsection{图运算}
+
+邻接矩阵 $\mathbf{A}$ 的构造采用双嵌入方法，其结果为非负、逐行归一化的矩阵。图卷积运算等价于加权聚合邻居信息：
+\begin{equation}
+    \mathbf{h}_n^{(l+1)} = \sum_{m=1}^{N} A_{nm} \, \mathbf{W}^{(l)} \mathbf{h}_m^{(l)}
+\end{equation}
+其中 $\mathbf{h}_n^{(l)}$ 为第 $l$ 层中第 $n$ 个节点的特征表示。
+
+\subsubsection{多尺度时序卷积}
+
+对于核大小 $k$ 的深度可分离卷积，第 $n$ 个变量在时间步 $s$ 的输出为：
+\begin{equation}
+    y_n^{(k)}(s) = \sum_{i=0}^{k-1} w_i^{(n,k)} \, x_n(s - \lfloor k/2 \rfloor + i) + b_n^{(k)}
+\end{equation}
+（对称填充模式下）。多尺度融合为：
+\begin{equation}
+    y_n(s) = \sum_{j=1}^{|\mathcal{K}|} \alpha_j \, y_n^{(k_j)}(s) + b_{\text{fusion}}
+\end{equation}
+
+\subsubsection{频域变换}
+
+对第 $n$ 个变量的时间序列 $\{x_n(0), \ldots, x_n(S-1)\}$，离散傅里叶变换定义为：
+\begin{equation}
+    X_n(f) = \sum_{s=0}^{S-1} x_n(s) \, e^{-j 2\pi f s / S}, \quad f = 0, 1, \ldots, \lfloor S/2 \rfloor
+\end{equation}
+逆变换恢复时域信号：
+\begin{equation}
+    x_n(s) = \frac{1}{S} \sum_{f=0}^{S-1} X_n(f) \, e^{j 2\pi f s / S}
+\end{equation}
+
+% ============================================================
+\subsection{训练目标与损失函数}
+
+AGF-ADNet 的训练损失由三部分组成：
+
+\subsubsection{时域重构损失}
+
+仅在已观测位置上计算均方误差：
+\begin{equation}
+    \mathcal{L}_{\text{time}} = \frac{\sum_{b,s,n} \left(\hat{X}_{b,s,n} - X_{b,s,n}\right)^2 \cdot M_{b,s,n}}{\sum_{b,s,n} M_{b,s,n} + \epsilon}
+\end{equation}
+
+\subsubsection{频域重构损失}
+
+对观测比例超过 50\% 的有效样本，比较重构信号与真实信号的幅度谱差异：
+\begin{equation}
+    \mathcal{L}_{\text{freq}} = \frac{1}{|\mathcal{B}_{\text{valid}}|} \sum_{b \in \mathcal{B}_{\text{valid}}} \frac{1}{NF} \sum_{n,f} \left(|\hat{X}_{b,n}(f)| - |X_{b,n}(f)|\right)^2
+\end{equation}
+其中 $\mathcal{B}_{\text{valid}} = \{b : \bar{M}_b > 0.5\}$ 为有效样本集合，$\bar{M}_b$ 为第 $b$ 个样本的平均观测率。
+
+\subsubsection{图稀疏性正则化}
+
+通过 $L_1$ 范数促进邻接矩阵的稀疏性：
+\begin{equation}
+    \mathcal{L}_{\text{sparse}} = \frac{1}{N^2} \sum_{i,j} |A_{ij}|
+\end{equation}
+
+\subsubsection{总损失函数}
+
+\begin{equation}
+    \mathcal{L} = \mathcal{L}_{\text{time}} + \lambda_f \, \mathcal{L}_{\text{freq}} + \lambda_s \, \mathcal{L}_{\text{sparse}}
+\end{equation}
+其中 $\lambda_f = 0.1$ 和 $\lambda_s = 0.01$ 分别为频域损失和稀疏性正则化的权重系数。
+
+\subsubsection{自监督训练策略}
+
+训练采用自监督随机掩码策略。在每个训练批次中：
+\begin{enumerate}
+    \item 生成随机掩码 $\mathbf{R} \sim \mathrm{Bernoulli}(0.9)^{B \times S \times N}$；
+    \item 构造输入掩码 $\mathbf{M}^{\text{input}} = \mathbf{M} \odot \mathbf{R}$；
+    \item 模型接收 $(\mathbf{X} \odot \mathbf{M}^{\text{input}}, \mathbf{M}^{\text{input}})$ 作为输入；
+    \item 损失在\textbf{所有原始已观测位置} $\mathbf{M}$ 上计算（而非仅 $\mathbf{M}^{\text{input}}$），从而迫使模型恢复被随机掩盖的值。
+\end{enumerate}
+
+\subsubsection{优化配置}
+
+\begin{itemize}
+    \item 优化器：Adam，初始学习率 $\eta = 10^{-3}$；
+    \item 学习率调度：ReduceLROnPlateau（衰减因子 0.5，耐心值 10）；
+    \item 梯度裁剪：$\|\nabla\|_{\max} = 1.0$；
+    \item 训练轮次：100 个 epoch，批量大小 32。
+\end{itemize}
+
+\end{document}

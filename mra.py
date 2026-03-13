@@ -10,6 +10,8 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 import matplotlib.pyplot as plt
 import os
 
+plt.rcParams['font.sans-serif'] = ['SimHei']
+
 # ==========================================
 # 1. Dataset Builder (Unchanged)
 # ==========================================
@@ -501,11 +503,11 @@ def train():
     # Visualization
     plt.figure(figsize=(6, 5))
     
-    plt.plot(scores, label='Anomaly Score', alpha=0.7)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'Threshold ({threshold:.4f})')
-    plt.xlabel('Sample Index')
-    plt.ylabel('Reconstruction Error')
-    plt.title('AGF-ADNet Anomaly Detection')
+    plt.plot(scores, label='异常分数', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
+    plt.xlabel('样本索引')
+    plt.ylabel('重构误差')
+    plt.title('AGF-ADNet异常检测')
     plt.legend()
     plt.grid(True, alpha=0.3)
    
