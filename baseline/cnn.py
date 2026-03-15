@@ -10,6 +10,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 
+import os
+import glob
+
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
 def plot_results(scores, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
@@ -28,28 +31,21 @@ def plot_results(scores, threshold, save_path='/home/akira/codespace/mra-detecti
     print(f"\nPlot saved to: {save_path}")
     plt.show()
 
-"""
-读取原始数据并生成掩码矩阵
-取前41个状态变量，返回原始数据，并替换NaN为1、正常数据为0生成掩码
-"""
-def generate_mask_matrix():
-    try:
-        data_path = Path(__file__).resolve().parent.parent / "TEP_3000_Block_Split.csv"
-        df = pd.read_csv(data_path)
-        # 提取 xmeas_1 到 xmeas_41 (丢弃后面的 xmv)
-        data_df = df.filter(like='xmeas_').iloc[:, :41]
-        data = data_df.astype(float).to_numpy()
-        # 1 代表缺失 (NaN), 0 代表观测值
-        mask = np.isnan(data).astype(int)
-        return data, mask
-    except FileNotFoundError:
-        print("警告: 找不到数据文件。正在生成模拟数据用于演示代码运行...")
-        # 生成模拟数据以确保代码可运行
-        mock_data = np.random.randn(3000, 41)
-        # 随机设置一些 NaN
-        mock_data[np.random.rand(*mock_data.shape) < 0.1] = np.nan
-        mock_mask = np.isnan(mock_data).astype(int)
-        return mock_data, mock_mask
+def load_csv_dir(dir_path, file_pattern="*.csv"):
+    """Load all CSV files matching file_pattern from a directory and concatenate.
+    CSVs are headerless with numeric columns.
+    Returns (data, num_features).
+    """
+    csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
+    dfs = []
+    for f in csv_files:
+        df = pd.read_csv(f, header=None)
+        dfs.append(df)
+        print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
+    data = pd.concat(dfs, ignore_index=True).to_numpy(dtype=np.float32)
+    return data, data.shape[1]
 
 def create_windows(data, seq_len=60, stride=1):
     """参考 mra.py 的滑窗方式，返回形状 (num_windows, seq_len, num_features)"""
@@ -73,60 +69,48 @@ def create_windows(data, seq_len=60, stride=1):
     return np.stack(windows)
 
 def prepare_data(seq_len=60, stride=1):
-    # 1. 加载数据
-    data, mask = generate_mask_matrix()
-    
-    if data is None:
-        return None, None, None, None
+    DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+    TRAIN_PATTERN = "train_*.csv"
+    TEST_PATTERN  = "test_*.csv"
 
-    # 2. 处理缺失值 (NaN)
-    # 神经网络不能输入 NaN。这里我们将 NaN 填充为 0。
-    # 由于后续会做标准化 (StandardScaler)，0 通常接近均值，是一个安全的填充值。
-    # 如果希望模型感知"缺失"这个特征，可以将 mask 也作为输入拼接到 data 后面，
-    # 但为了保持 CNN 简单，这里仅做填充。
-    data = np.nan_to_num(data, nan=0.0)
+    # 1. 加载训练和测试数据
+    print("Loading training data...")
+    train_data, num_features = load_csv_dir(str(DATA_DIR / "train"), TRAIN_PATTERN)
+    print(f"Training data: {train_data.shape}, num_features={num_features}")
 
-    # 3. 生成标签 (0: 正常, 1: 异常)
-    # 前1500正常，后1500异常
-    y_normal = np.zeros(1500)
-    y_faulty = np.ones(1500)
-    y = np.concatenate([y_normal, y_faulty])
+    print("\nLoading test data...")
+    test_data, _ = load_csv_dir(str(DATA_DIR / "test"), TEST_PATTERN)
+    print(f"Test data: {test_data.shape}")
 
-    # 4. 数据分割 (训练集/测试集)
-    # 前 50% 用于训练，后 50% 用于测试（保持时间顺序，不打乱）
-    split_idx = len(data) // 2
+    # 2. 处理缺失值
+    train_data = np.nan_to_num(train_data, nan=0.0)
+    test_data = np.nan_to_num(test_data, nan=0.0)
 
-    # 5. 标准化 (Standardization)
+    # 3. 标准化 (fit on training data only)
     scaler = StandardScaler()
-    scaler.fit(data[:split_idx])
-    data_scaled = scaler.transform(data)  # 使用训练集的参数转换全量数据
+    train_data_scaled = scaler.fit_transform(train_data).astype(np.float32)
+    test_data_scaled = scaler.transform(test_data).astype(np.float32)
 
-    # 6. 生成滑窗 (参考 mra.py)
-    X_train = create_windows(data_scaled[:split_idx], seq_len=seq_len, stride=stride)
-    X_test = create_windows(data_scaled[split_idx:], seq_len=seq_len, stride=stride)
-    y_train = y[:split_idx:stride]
-    y_test = y[split_idx::stride]
+    # 4. 生成滑窗
+    X_train = create_windows(train_data_scaled, seq_len=seq_len, stride=stride)
+    X_test = create_windows(test_data_scaled, seq_len=seq_len, stride=stride)
 
-    # 7. 重塑数据以适应 1D-CNN
-    # PyTorch Conv1d 输入形状: (Batch_Size, Channels, Length)
-    # 将 41 个变量作为通道数，滑窗长度 seq_len 作为序列长度
-    X_train = np.transpose(X_train, (0, 2, 1))  # (N, 41, seq_len)
+    # 5. 重塑数据以适应 1D-CNN: (Batch_Size, Channels, Length)
+    X_train = np.transpose(X_train, (0, 2, 1))  # (N, num_features, seq_len)
     X_test = np.transpose(X_test, (0, 2, 1))
 
-    # 8. 转为 PyTorch Tensor
+    # 6. 转为 PyTorch Tensor
     X_train_tensor = torch.FloatTensor(X_train)
-    y_train_tensor = torch.FloatTensor(y_train).unsqueeze(1)  # shape变为 (N, 1)
     X_test_tensor = torch.FloatTensor(X_test)
-    y_test_tensor = torch.FloatTensor(y_test).unsqueeze(1)
 
-    return X_train_tensor, y_train_tensor, X_test_tensor, y_test_tensor
+    return X_train_tensor, X_test_tensor, num_features
 
 # ---------------------------------------------------------
 # 2. 定义 1D-CNN 模型
 # ---------------------------------------------------------
 
 class AnomalyDetectorCNN(nn.Module):
-    def __init__(self, num_features=41):
+    def __init__(self, num_features=18):
         super(AnomalyDetectorCNN, self).__init__()
 
         # 1D-CNN Autoencoder: train on normal, detect anomalies by reconstruction error
@@ -172,7 +156,7 @@ def train_model():
     # 准备数据
     SEQ_LEN = 60
     STRIDE = 1
-    X_train, y_train, X_test, y_test = prepare_data(seq_len=SEQ_LEN, stride=STRIDE)
+    X_train, X_test, num_features = prepare_data(seq_len=SEQ_LEN, stride=STRIDE)
     
     # 创建 DataLoader
     train_dataset = TensorDataset(X_train, X_train)
@@ -180,12 +164,12 @@ def train_model():
 
     # 初始化模型、损失函数、优化器
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AnomalyDetectorCNN(num_features=41).to(device)
+    model = AnomalyDetectorCNN(num_features=num_features).to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # 训练循环
-    epochs = 30
+    epochs = 10
     print(f"开始训练，共 {epochs} 个 Epoch...")
     
     for epoch in range(epochs):
@@ -216,7 +200,8 @@ def train_model():
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
-        threshold = train_mean + 3.0 * train_std
+        # threshold = train_mean + 3.0 * train_std
+        threshold = train_mean
 
         recon_test = model(X_test_dev)
         test_scores = (recon_test - X_test_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()

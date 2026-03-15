@@ -13,56 +13,59 @@ import os
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
 # ==========================================
-# 1. Dataset Builder (Unchanged)
+# 1. Dataset Builder (loads from data/ directory)
 # ==========================================
-class TEPDatasetBuilder:
+class DatasetBuilder:
     def __init__(self, seq_len=60, stride=1):
         self.seq_len = seq_len
         self.stride = stride
         self.scaler = StandardScaler()
+        self.num_features = None
 
-    def load_data(self, file_path):
-        if not os.path.exists(file_path):
-            print(f"Warning: {file_path} not found. Generating mock data.")
-            return self._generate_mock_data()
-            
-        df = pd.read_csv(file_path)
-        data = df.filter(like="xmeas_").iloc[:, :41].to_numpy()
-        mask = (~np.isnan(data)).astype(np.float32)
+    def load_dir(self, dir_path, file_pattern="*.csv"):
+        """Load CSV files matching file_pattern from a directory and concatenate.
+        CSVs are headerless with numeric columns.
+        Returns (data, mask) where mask is all 1s (fully observed).
+        """
+        import glob
+        csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
+        if not csv_files:
+            raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
+
+        dfs = []
+        for f in csv_files:
+            df = pd.read_csv(f, header=None)
+            dfs.append(df)
+            print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
+
+        data = pd.concat(dfs, ignore_index=True).to_numpy(dtype=np.float32)
+        self.num_features = data.shape[1]
+        mask = np.ones_like(data, dtype=np.float32)
+        return data, mask
+
+    def fit_scaler(self, data):
+        """Fit the scaler on (training) data."""
         data_filled = np.nan_to_num(data, nan=0.0)
-        self.scaler.fit(data_filled[:1500])
-        data_scaled = self.scaler.transform(data_filled)
-        return data_scaled.astype(np.float32), mask
+        self.scaler.fit(data_filled)
 
-    def _generate_mock_data(self):
-        t = np.linspace(0, 10, 3000)
-        data = np.zeros((3000, 41))
-        for i in range(41):
-            freq = 50 if i % 2 == 0 else 0.5
-            phase = np.random.rand() * 2 * np.pi
-            signal = np.sin(2 * np.pi * freq * t + phase) + \
-                     0.1 * np.sin(2 * np.pi * freq * 3 * t) 
-            data[:, i] = signal + np.random.randn(3000) * 0.05
-            
-        mask = np.ones_like(data)
-        for col in range(10, 41):
-            mask[::3, col] = 0
-        
-        return data.astype(np.float32), mask.astype(np.float32)
+    def transform(self, data):
+        """Scale data using the fitted scaler."""
+        data_filled = np.nan_to_num(data, nan=0.0)
+        return self.scaler.transform(data_filled).astype(np.float32)
 
     def create_windows(self, data, mask):
         X, M = [], []
         n = len(data)
-        
+        num_feat = data.shape[1]
+
         if n == 0:
-            return np.zeros((0, self.seq_len, 41)), np.zeros((0, self.seq_len, 41))
-    
+            return np.zeros((0, self.seq_len, num_feat)), np.zeros((0, self.seq_len, num_feat))
+
         for i in range(0, n, self.stride):
             if i < self.seq_len:
-                # Front-pad by repeating the first sample
                 pad_len = self.seq_len - i - 1
                 window_data = np.concatenate([
-                    np.tile(data[0:1], (pad_len, 1)),  # repeat first sample
+                    np.tile(data[0:1], (pad_len, 1)),
                     data[0 : i + 1]
                 ], axis=0)
                 window_mask = np.concatenate([
@@ -70,13 +73,12 @@ class TEPDatasetBuilder:
                     mask[0 : i + 1]
                 ], axis=0)
             else:
-                # Normal lookback: take the previous seq_len samples
                 window_data = data[i - self.seq_len + 1 : i + 1]
                 window_mask = mask[i - self.seq_len + 1 : i + 1]
-    
+
             X.append(window_data)
             M.append(window_mask)
-    
+
         return np.stack(X), np.stack(M)
 
 
@@ -175,7 +177,7 @@ class FrequencyImputer(nn.Module):
     FIXED: Implements proper attention mechanism over frequency features.
     Attention weights are computed and applied to the magnitude spectrum.
     """
-    def __init__(self, seq_len, num_nodes=41):
+    def __init__(self, seq_len, num_nodes=18):
         super().__init__()
         self.freq_len = seq_len // 2 + 1
         self.num_nodes = num_nodes
@@ -267,7 +269,7 @@ class GatedFusion(nn.Module):
 # 7. AGF-ADNet (Fixed Integration)
 # ==========================================
 class AGF_ADNet(nn.Module):
-    def __init__(self, num_nodes=41, seq_len=60, d_model=64):
+    def __init__(self, num_nodes=18, seq_len=60, d_model=64):
         super().__init__()
         self.num_nodes = num_nodes
         self.seq_len = seq_len
@@ -372,12 +374,31 @@ def dual_domain_loss(x_rec, x_true, mask, adj, freq_weight=0.1, sparsity_weight=
 # ==========================================
 def train():
     SEQ_LEN = 60
-    builder = TEPDatasetBuilder(SEQ_LEN)
-    data, mask = builder.load_data("./TEP_3000_Block_Split.csv")
-    
-    split = int(len(data)*0.5)
-    Xtr, Mtr = builder.create_windows(data[:split], mask[:split])
-    Xte, Mte = builder.create_windows(data[split:], mask[split:])
+    DATA_DIR = "./data"
+    builder = DatasetBuilder(SEQ_LEN)
+
+    # Load train and test data from separate directories
+    # Use file_pattern to select only files with consistent column counts
+    TRAIN_PATTERN = "train_*.csv"      # 18-col files
+    TEST_PATTERN  = "test_*.csv"        # 18-col files
+
+    print("Loading training data...")
+    train_data, train_mask = builder.load_dir(os.path.join(DATA_DIR, "train"), TRAIN_PATTERN)
+    num_features = builder.num_features
+    print(f"Training data: {train_data.shape}, num_features={num_features}")
+
+    print("\nLoading test data...")
+    test_data, test_mask = builder.load_dir(os.path.join(DATA_DIR, "test"), TEST_PATTERN)
+    print(f"Test data: {test_data.shape}")
+
+    # Fit scaler on training data, then transform both
+    builder.fit_scaler(train_data)
+    train_data_scaled = builder.transform(train_data)
+    test_data_scaled = builder.transform(test_data)
+
+    # Create sliding windows
+    Xtr, Mtr = builder.create_windows(train_data_scaled, train_mask)
+    Xte, Mte = builder.create_windows(test_data_scaled, test_mask)
 
     if len(Xtr) == 0: 
         print("No training data available!")
@@ -391,12 +412,12 @@ def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
     
-    model = AGF_ADNet(seq_len=SEQ_LEN).to(device)
+    model = AGF_ADNet(num_nodes=num_features, seq_len=SEQ_LEN).to(device)
     opt = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=10)
 
     print("Starting training...")
-    for epoch in range(100):
+    for epoch in range(10):
         model.train()
         total_loss = 0
         
@@ -453,7 +474,8 @@ def train():
             train_scores.extend((sq_err / obs_cnt).cpu().numpy())
 
     train_scores = np.array(train_scores)
-    threshold = np.mean(train_scores) + 3 * np.std(train_scores)
+    # threshold = np.mean(train_scores) + 3 * np.std(train_scores)
+    threshold=np.mean(train_scores)
     
     print(f"\nTraining Set Score Stats:")
     print(f"  Mean: {np.mean(train_scores):.6f}")

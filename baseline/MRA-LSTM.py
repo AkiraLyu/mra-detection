@@ -13,12 +13,15 @@ from torch.utils.data import Dataset, DataLoader
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 import warnings
+import os
+import glob
+from pathlib import Path
 warnings.filterwarnings('ignore')
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-class TEPDataset(Dataset):
-    """Dataset for Tennessee Eastman Process data.
+class SequenceDataset(Dataset):
+    """Dataset for multirate data.
 
     Uses front-padding sliding window (following mra.py methodology):
     - For each data point i, the input window covers [i - seq_len + 1, i].
@@ -26,14 +29,13 @@ class TEPDataset(Dataset):
     - This produces exactly one window per data point (stride=1), so every
       sample gets a corresponding anomaly score.
     """
-    def __init__(self, data, feature_cols, sequence_length=30,
+    def __init__(self, data, sequence_length=30,
                  prediction_horizon=1, stride=1, training=True):
         self.sequence_length = sequence_length
         self.prediction_horizon = prediction_horizon
         self.training = training
-        self.feature_cols = feature_cols
 
-        values = data[feature_cols].values.astype(np.float32)
+        values = data.astype(np.float32)
         n = len(values)
 
         # Build windows with front-padding (mra.py style)
@@ -46,7 +48,7 @@ class TEPDataset(Dataset):
             if i < sequence_length:
                 pad_len = sequence_length - i - 1
                 window = np.concatenate([
-                    np.tile(values[0:1], (pad_len, 1)),   # repeat first sample
+                    np.tile(values[0:1], (pad_len, 1)),
                     values[0:i + 1]
                 ], axis=0)
             else:
@@ -58,7 +60,6 @@ class TEPDataset(Dataset):
             if y_end <= n:
                 target = values[y_start:y_end]
             else:
-                # Pad with the last sample when at the boundary
                 available = values[y_start:n] if y_start < n else values[-1:]
                 pad_needed = prediction_horizon - len(available)
                 target = np.concatenate([
@@ -69,14 +70,11 @@ class TEPDataset(Dataset):
             self.x_windows.append(window)
             self.y_windows.append(target)
 
-            # Label
+            # Label: training=0 (normal), test=1 (anomaly)
             if training:
                 self.labels.append(0)
             else:
-                if 'faultNumber' in data.columns:
-                    self.labels.append(int(data['faultNumber'].iloc[i]))
-                else:
-                    self.labels.append(0)
+                self.labels.append(1)
 
     def __len__(self):
         return len(self.x_windows)
@@ -400,40 +398,50 @@ class MRALSTM(nn.Module):
         return predictions
 
 
-def load_and_preprocess_data(csv_path, n_train=1500):
-    """Load and preprocess TEP dataset"""
-    # Load data
-    df = pd.read_csv(csv_path)
+def load_csv_dir(dir_path, file_pattern="*.csv"):
+    """Load all CSV files matching file_pattern from a directory and concatenate.
+    CSVs are headerless with numeric columns.
+    Returns (data, num_features).
+    """
+    csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
+    dfs = []
+    for f in csv_files:
+        df = pd.read_csv(f, header=None)
+        dfs.append(df)
+        print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
+    data = pd.concat(dfs, ignore_index=True).to_numpy(dtype=np.float32)
+    return data, data.shape[1]
 
-    # Separate train (normal) and test data
-    train_df = df.iloc[:n_train].copy()
-    test_df = df.iloc[n_train:].copy()
 
-    # Get feature columns (exclude faultNumber, simulationRun, sample)
-    feature_cols = [c for c in df.columns if c not in ['faultNumber', 'simulationRun', 'sample']]
+def load_and_preprocess_data():
+    """Load and preprocess data from data/ directory"""
+    DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+    TRAIN_PATTERN = "train_*.csv"
+    TEST_PATTERN  = "test_*.csv"
 
-    # Handle NaN values - forward fill then backward fill
-    for col in feature_cols:
-        train_df[col] = train_df[col].ffill().bfill()
-        test_df[col] = test_df[col].ffill().bfill()
+    print("Loading training data...")
+    train_data, num_features = load_csv_dir(str(DATA_DIR / "train"), TRAIN_PATTERN)
+    print(f"Training data: {train_data.shape}, num_features={num_features}")
 
-    # If still NaN, fill with column mean
-    for col in feature_cols:
-        mean_val = train_df[col].mean()
-        if pd.isna(mean_val):
-            mean_val = 0
-        train_df[col] = train_df[col].fillna(mean_val)
-        test_df[col] = test_df[col].fillna(mean_val)
+    print("\nLoading test data...")
+    test_data, _ = load_csv_dir(str(DATA_DIR / "test"), TEST_PATTERN)
+    print(f"Test data: {test_data.shape}")
+
+    # Handle NaN values
+    train_data = np.nan_to_num(train_data, nan=0.0)
+    test_data = np.nan_to_num(test_data, nan=0.0)
 
     # Normalize to [0, 1] using train statistics
     scaler = MinMaxScaler()
-    train_df[feature_cols] = scaler.fit_transform(train_df[feature_cols])
-    test_df[feature_cols] = scaler.transform(test_df[feature_cols])
+    train_data_norm = scaler.fit_transform(train_data).astype(np.float32)
+    test_data_norm = scaler.transform(test_data).astype(np.float32)
 
-    return train_df, test_df, feature_cols, scaler
+    return train_data_norm, test_data_norm, num_features, scaler
 
 
-def train_model(model, train_loader, num_epochs=50, lr=0.001, device='cpu'):
+def train_model(model, train_loader, num_epochs=10, lr=0.001, device='cpu'):
     """Train the MRA-LSTM model"""
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
@@ -613,23 +621,20 @@ def main():
     print(f"Using device: {device}")
 
     # Parameters
-    csv_path = '../TEP_3000_Block_Split.csv'
-    n_train = 1500
     sequence_length = 30
     prediction_horizon = 1
     batch_size = 32
-    num_epochs = 50
+    num_epochs = 10
     lr = 0.001
 
     # Load and preprocess data
     print("Loading and preprocessing data...")
-    train_df, test_df, feature_cols, scaler = load_and_preprocess_data(csv_path, n_train)
-    print(f"Training samples: {len(train_df)}, Test samples: {len(test_df)}")
-    print(f"Number of features: {len(feature_cols)}")
+    train_data, test_data, num_features, scaler = load_and_preprocess_data()
+    print(f"Number of features: {num_features}")
 
     # Create datasets and dataloaders
-    train_dataset = TEPDataset(train_df, feature_cols, sequence_length, prediction_horizon, training=True)
-    test_dataset = TEPDataset(test_df, feature_cols, sequence_length, prediction_horizon, training=False)
+    train_dataset = SequenceDataset(train_data, sequence_length, prediction_horizon, training=True)
+    test_dataset = SequenceDataset(test_data, sequence_length, prediction_horizon, training=False)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
@@ -637,10 +642,10 @@ def main():
     print(f"Training sequences: {len(train_dataset)}, Test sequences: {len(test_dataset)}")
 
     # Model parameters
-    input_size = len(feature_cols)
+    input_size = num_features
     hidden_sizes = [64, 32]
     num_layers = len(hidden_sizes)
-    output_size = len(feature_cols)
+    output_size = num_features
 
     # Initialize model
     print("\nInitializing MRA-LSTM model...")
@@ -674,7 +679,8 @@ def main():
     print(f"Training error stats - mean: {train_errors.mean():.6f}, std: {train_errors.std():.6f}, max: {train_errors.max():.6f}")
 
     # Compute threshold based on training data (e.g., 95th percentile of training errors)
-    threshold_train = np.percentile(train_errors, 95)
+    #threshold_train = np.percentile(train_errors, 95)
+    threshold_train=np.mean(train_errors)
     print(f"Training-based threshold (95th percentile): {threshold_train:.6f}")
 
     # Compute anomaly scores on test data

@@ -2,6 +2,8 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+import glob
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 from sklearn.preprocessing import StandardScaler
@@ -27,20 +29,18 @@ seed_everything(40)
 # ==========================================
 # 1. 数据加载与预处理模块
 # ==========================================
-def generate_mask_matrix():
-    """读取之前生成的块状分布 CSV 数据"""
-    try:
-        # 读取 CSV，保留表头以便确认列名
-        df = pd.read_csv("./TEP_3000_Block_Split.csv")
-        # 提取 xmeas_1 到 xmeas_41 (丢弃后面的 xmv)
-        data_df = df.filter(like="xmeas_").iloc[:, :41]
-        data = data_df.astype(float).to_numpy()
-        # 1 代表缺失 (NaN), 0 代表观测值
-        mask = np.isnan(data).astype(int)
-        return data, mask
-    except FileNotFoundError:
-        print("找不到数据文件，请确保 TEP_3000_Block_Split.csv 在当前目录下")
-        return None, None
+def load_csv_dir(dir_path, file_pattern="*.csv"):
+    """Load CSV files matching file_pattern from a directory and concatenate."""
+    csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
+    if not csv_files:
+        raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
+    dfs = []
+    for f in csv_files:
+        df = pd.read_csv(f, header=None)
+        dfs.append(df)
+        print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
+    data = pd.concat(dfs, ignore_index=True).to_numpy(dtype=np.float32)
+    return data, data.shape[1]
 
 
 def create_windows(data, mask, seq_len, stride=1):
@@ -53,10 +53,9 @@ def create_windows(data, mask, seq_len, stride=1):
 
     for i in range(0, n, stride):
         if i < seq_len:
-            # Front-pad by repeating the first sample
             pad_len = seq_len - i - 1
             window_data = np.concatenate([
-                np.tile(data[0:1], (pad_len, 1)),  # repeat first sample
+                np.tile(data[0:1], (pad_len, 1)),
                 data[0 : i + 1]
             ], axis=0)
             window_mask = np.concatenate([
@@ -64,7 +63,6 @@ def create_windows(data, mask, seq_len, stride=1):
                 mask[0 : i + 1]
             ], axis=0)
         else:
-            # Normal lookback: take the previous seq_len samples
             window_data = data[i - seq_len + 1 : i + 1]
             window_mask = mask[i - seq_len + 1 : i + 1]
 
@@ -79,30 +77,38 @@ def create_windows(data, mask, seq_len, stride=1):
 # ==========================================
 def run_full_detection():
     # --- A. 准备数据 ---
-    raw_data, raw_mask = generate_mask_matrix()
-    if raw_data is None:
-        return
+    DATA_DIR = "./data"
+    TRAIN_PATTERN = "train_*.csv"
+    TEST_PATTERN  = "test_*.csv"
 
-    # 处理 NaN 以便进行标准化 (StandardScaler 不接受 NaN)
-    temp_data = np.nan_to_num(raw_data, nan=0.0)
+    print("Loading training data...")
+    train_data, num_features = load_csv_dir(os.path.join(DATA_DIR, "train"), TRAIN_PATTERN)
+    print(f"Training data: {train_data.shape}, num_features={num_features}")
+
+    print("\nLoading test data...")
+    test_data, _ = load_csv_dir(os.path.join(DATA_DIR, "test"), TEST_PATTERN)
+    print(f"Test data: {test_data.shape}")
+
+    # 处理 NaN
+    train_data = np.nan_to_num(train_data, nan=0.0)
+    test_data = np.nan_to_num(test_data, nan=0.0)
+
+    # 标准化 (fit on training data only)
     scaler = StandardScaler()
-    scaler.fit(temp_data[:1500])
-    scaled_data = scaler.transform(temp_data)
+    train_scaled = scaler.fit_transform(train_data).astype(np.float32)
+    test_scaled = scaler.transform(test_data).astype(np.float32)
 
     # --- B. 模型参数配置 ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    feature_dim = 41
-    window_size = 60  # 滑动窗口长度
-    s_rate = 3  # 采样类型
+    feature_dim = num_features
+    window_size = 60
+    s_rate = 3
 
-    # --- C. 创建滑动窗口 (与 mra.py 一致) ---
-    # 将 mask 转换为观测掩码: 1=观测到, 0=缺失 (与 mra.py 一致)
-    obs_mask = 1 - raw_mask.astype(np.float32)
-    X_windows, M_windows = create_windows(scaled_data.astype(np.float32), obs_mask, seq_len=window_size, stride=1)
-
-    split = 1500  # 正常/故障分界点
-    X_train, M_train = X_windows[:split], M_windows[:split]
-    X_test, M_test = X_windows[split:], M_windows[split:]
+    # --- C. 创建滑动窗口 ---
+    train_mask = np.ones_like(train_scaled, dtype=np.float32)
+    test_mask = np.ones_like(test_scaled, dtype=np.float32)
+    X_train, M_train = create_windows(train_scaled, train_mask, seq_len=window_size, stride=1)
+    X_test, M_test = create_windows(test_scaled, test_mask, seq_len=window_size, stride=1)
 
     # --- D. 初始化模型 ---
     model = MSTransformer(
@@ -151,7 +157,8 @@ def run_full_detection():
             train_scores.extend((sq_err / obs_cnt).cpu().numpy())
 
     train_scores = np.array(train_scores)
-    threshold = np.mean(train_scores) + 3 * np.std(train_scores)
+    #threshold = np.mean(train_scores) + 3 * np.std(train_scores)
+    threshold = np.mean(train_scores)
 
     print(f"\nTraining Set Score Stats:")
     print(f"  Mean: {np.mean(train_scores):.6f}")
@@ -223,7 +230,7 @@ def plot_results(scores, threshold):
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
     plt.xlabel('样本索引')
     plt.ylabel('重构误差')
-    plt.title('AGF-ADNet异常检测')
+    plt.title('Multirate Former 异常检测')
     plt.legend()
     plt.grid(True, alpha=0.3)
 
