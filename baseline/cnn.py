@@ -15,12 +15,13 @@ import glob
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-def plot_results(scores, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
+def plot_results(scores, threshold, split_idx, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """绘制异常检测可视化图（与 mra.py 完全一致）"""
     plt.figure(figsize=(6, 5))
-    plt.plot(scores, label='异常分数', alpha=0.7)
+    plt.plot(scores, label='测试异常分数', alpha=0.7)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
-    plt.xlabel('样本索引')
+    plt.axvline(x=split_idx, color='g', linestyle=':', label='测试集分界')
+    plt.xlabel('测试样本索引')
     plt.ylabel('重构误差')
     plt.title('CNN异常检测')
     plt.legend()
@@ -200,21 +201,19 @@ def train_model():
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
-        # threshold = train_mean + 3.0 * train_std
         threshold = train_mean
 
         recon_test = model(X_test_dev)
         test_scores = (recon_test - X_test_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()
-
-        # Splice train scores to front of test scores for evaluation
-        all_scores = np.concatenate([train_scores, test_scores])
-        # Labels: 0 for train (normal), 1 for test (anomaly)
-        y_true = np.concatenate([np.zeros(len(train_scores), dtype=int), np.ones(len(test_scores), dtype=int)])
-        y_pred = (all_scores > threshold).astype(int)
+        split_idx = len(test_scores) // 2
+        y_true = np.zeros(len(test_scores), dtype=int)
+        y_true[split_idx:] = 1
+        y_pred = (test_scores > threshold).astype(int)
 
         print(f"Device: {device}")
         print(f"Train recon error: mean={train_mean:.6f}, std={train_std:.6f}")
-        print(f"Threshold (mean + 3*std): {threshold:.6f}")
+        print(f"Threshold (mean train score): {threshold:.6f}")
+        print(f"Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores)}) anomaly")
         print(f"Anomalies detected: {(y_pred == 1).sum()} / {len(y_pred)}")
 
         acc = accuracy_score(y_true, y_pred)
@@ -228,7 +227,7 @@ def train_model():
         print(f"  Recall:    {rec:.4f}")
         print(f"  F1-Score:  {f1:.4f}")
 
-        plot_results(all_scores, threshold)
+        plot_results(test_scores, threshold, split_idx)
         
 if __name__ == "__main__":
     train_model()

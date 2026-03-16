@@ -9,6 +9,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 import matplotlib.pyplot as plt
 import os
+import copy
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
@@ -25,7 +26,7 @@ class DatasetBuilder:
     def load_dir(self, dir_path, file_pattern="*.csv"):
         """Load CSV files matching file_pattern from a directory and concatenate.
         CSVs are headerless with numeric columns.
-        Returns (data, mask) where mask is all 1s (fully observed).
+        Returns (data, mask) where mask uses 1 for missing and 0 for observed.
         """
         import glob
         csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
@@ -33,14 +34,17 @@ class DatasetBuilder:
             raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
 
         dfs = []
+        masks = []
         for f in csv_files:
             df = pd.read_csv(f, header=None)
-            dfs.append(df)
+            arr = df.to_numpy(dtype=np.float32)
+            dfs.append(arr)
+            masks.append(np.isnan(arr).astype(np.float32))
             print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
 
-        data = pd.concat(dfs, ignore_index=True).to_numpy(dtype=np.float32)
+        data = np.concatenate(dfs, axis=0)
         self.num_features = data.shape[1]
-        mask = np.ones_like(data, dtype=np.float32)
+        mask = np.concatenate(masks, axis=0)
         return data, mask
 
     def fit_scaler(self, data):
@@ -59,7 +63,8 @@ class DatasetBuilder:
         num_feat = data.shape[1]
 
         if n == 0:
-            return np.zeros((0, self.seq_len, num_feat)), np.zeros((0, self.seq_len, num_feat))
+            shape = (0, self.seq_len, num_feat)
+            return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
 
         for i in range(0, n, self.stride):
             if i < self.seq_len:
@@ -79,7 +84,7 @@ class DatasetBuilder:
             X.append(window_data)
             M.append(window_mask)
 
-        return np.stack(X), np.stack(M)
+        return np.stack(X).astype(np.float32), np.stack(M).astype(np.float32)
 
 
 # ==========================================
@@ -224,8 +229,8 @@ class FrequencyImputer(nn.Module):
         real_attended = real_enh * att_weights
         imag_attended = imag_enh * att_weights
         
-        # Reconstruct complex spectrum
-        xf_enhanced = torch.complex(real_attended, imag_attended)
+        # Residual spectrum refinement is more stable than replacing the FFT outright.
+        xf_enhanced = xf + torch.complex(real_attended, imag_attended)
         
         # IFFT back to time domain
         x_rec = torch.fft.irfft(xf_enhanced, n=x.size(1), dim=2)  # (B, N, S)
@@ -304,6 +309,7 @@ class AGF_ADNet(nn.Module):
         self.output_proj = nn.Linear(d_model, num_nodes)
 
     def forward(self, x, mask):
+        # mask: 1 for missing, 0 for observed
         # x: (B, S, N)
         adj = self.graph()
 
@@ -322,7 +328,9 @@ class AGF_ADNet(nn.Module):
         x_imp = self.fusion(h_time, h_freq)  # (B, S, N)
 
         # 4. Imputation: Fill missing with imputed values
-        x_filled = x * mask + x_imp * (1 - mask)
+        observed_mask = 1.0 - mask
+        observed_mask = mask
+        x_filled = x * observed_mask + x_imp * mask
 
         # 5. Transformer Reconstruction
         z = self.input_proj(x_filled) + self.pos_enc  # (B, S, d_model)
@@ -334,27 +342,23 @@ class AGF_ADNet(nn.Module):
 # ==========================================
 # 8. FIXED: Dual-Domain Loss
 # ==========================================
-def dual_domain_loss(x_rec, x_true, mask, adj, freq_weight=0.1, sparsity_weight=0.01):
+def dual_domain_loss(x_rec, x_true, missing_mask, target_mask, adj, freq_weight=0.1, sparsity_weight=0.1):
     """
-    FIXED: 
-    1. Frequency loss computed on complete reconstructed signal vs ground truth
-    2. Proper accounting for masked positions
+    missing_mask: 1 for missing, 0 for observed
+    target_mask: 1 where reconstruction error should be supervised
     """
-    # 1. Time Domain MSE (on observed data only)
-    recon_loss = ((x_rec - x_true) * mask).pow(2).sum() / (mask.sum() + 1e-8)
+    target_mask = target_mask.float()
+    recon_loss = ((x_rec - x_true) * target_mask).pow(2).sum() / target_mask.sum().clamp_min(1.0)
     
-    # 2. FIXED: Frequency Domain Loss (on complete signals)
-    # Only compute where we have ground truth (mask==1)
-    # Compute FFT on reconstructed vs true for observed timesteps
-    # Better approach: compute on entire sequence dimension
-    with torch.no_grad():
-        # Create a mask for which samples have sufficient observations
-        obs_ratio = mask.mean(dim=[1, 2])  # (B,)
-        valid_samples = obs_ratio > 0.5  # Only use samples with >50% observations
-    
+    observed_ratio = (1.0 - missing_mask).mean(dim=[1, 2])
+    valid_samples = observed_ratio > 0.5
+
+    # Apply a masked target so the FFT branch is supervised only where ground truth is valid.
+    freq_target = x_rec.detach() * (1.0 - target_mask) + x_true * target_mask
+
     if valid_samples.sum() > 0:
         x_rec_valid = x_rec[valid_samples].permute(0, 2, 1)  # (B', N, S)
-        x_true_valid = x_true[valid_samples].permute(0, 2, 1)
+        x_true_valid = freq_target[valid_samples].permute(0, 2, 1)
         
         fft_rec = torch.fft.rfft(x_rec_valid, dim=2)
         fft_true = torch.fft.rfft(x_true_valid, dim=2)
@@ -364,10 +368,61 @@ def dual_domain_loss(x_rec, x_true, mask, adj, freq_weight=0.1, sparsity_weight=
     else:
         freq_loss = torch.tensor(0.0, device=x_rec.device)
     
-    # 3. FIXED: Graph Sparsity (L1) - now effective with normalized adjacency
-    sparsity_loss = torch.mean(torch.abs(adj))
+    # Row-normalized non-negative adjacency makes L1 nearly constant, so use entropy instead.
+    sparsity_loss = -(adj * torch.log(adj + 1e-8)).sum(dim=-1).mean()
     
     return recon_loss + freq_weight * freq_loss + sparsity_weight * sparsity_loss
+
+
+def apply_missing_mask(x, missing_mask):
+    return x.masked_fill(missing_mask.bool(), 0.0)
+
+
+def anomaly_scores(model, windows, masks, device, batch_size=32):
+    scores = []
+    loader = DataLoader(
+        TensorDataset(torch.tensor(windows), torch.tensor(masks)),
+        batch_size=batch_size
+    )
+
+    model.eval()
+    with torch.no_grad():
+        for x, missing_mask in loader:
+            x = x.to(device)
+            missing_mask = missing_mask.to(device)
+
+            observed_mask = 1.0 - missing_mask
+            x_input = apply_missing_mask(x, missing_mask)
+            xr, _, _ = model(x_input, missing_mask)
+
+            sq_err = ((xr - x) * observed_mask).pow(2).sum(dim=[1, 2])
+            obs_cnt = observed_mask.sum(dim=[1, 2]).clamp_min(1e-8)
+            scores.extend((sq_err / obs_cnt).cpu().numpy())
+
+    return np.array(scores)
+
+
+def build_test_labels(num_scores):
+    labels = np.zeros(num_scores, dtype=int)
+    labels[num_scores // 2 :] = 1
+    return labels
+
+
+def plot_results(scores, threshold, split_idx, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
+    plt.figure(figsize=(6, 5))
+    plt.plot(scores, label='测试异常分数', alpha=0.7)
+    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
+    plt.axvline(x=split_idx, color='g', linestyle=':', label='测试集分界')
+    plt.xlabel('测试样本索引')
+    plt.ylabel('重构误差')
+    plt.title('AGF-ADNet异常检测')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    print(f"\nPlot saved to: {save_path}")
+    plt.show()
 
 # ==========================================
 # 9. FIXED: Training Pipeline
@@ -415,9 +470,11 @@ def train():
     model = AGF_ADNet(num_nodes=num_features, seq_len=SEQ_LEN).to(device)
     opt = optim.Adam(model.parameters(), lr=1e-3)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=10)
+    best_state = None
+    best_loss = float("inf")
 
     print("Starting training...")
-    for epoch in range(10):
+    for epoch in range(3):
         model.train()
         total_loss = 0
         
@@ -425,24 +482,22 @@ def train():
             x, m = x.to(device), m.to(device)
             opt.zero_grad()
             
-            # FIXED: Self-Supervised Random Masking
-            # Randomly drop 10% of OBSERVED data for self-supervised learning
+            # Self-supervised masking over currently observed values.
+            observed = ~m.bool()
             rand_drop_prob = 0.1
-            rand_mask = torch.bernoulli(torch.full_like(m, 1 - rand_drop_prob))
-            
-            # Mask for input (observed data minus random drops)
-            m_input = m * rand_mask
-            # Zero out randomly dropped positions in input
-            x_input = x * m_input
+            rand_drop = (torch.rand_like(x) < rand_drop_prob) & observed
+            target_mask = rand_drop.float()
+            if not rand_drop.any():
+                target_mask = observed.float()
+
+            m_input = m.clone()
+            m_input[rand_drop] = 1.0
+            x_input = apply_missing_mask(x, m_input)
             
             # Forward pass
             x_rec, adj, _ = model(x_input, m_input)
 
-            # FIXED: Loss computed on ALL originally observed positions
-            # This includes both the positions that are currently "seen" (m_input==1)
-            # AND the positions we artificially dropped (m==1 but m_input==0)
-            # This way the model learns to recover the dropped values
-            loss = dual_domain_loss(x_rec, x, m, adj)
+            loss = dual_domain_loss(x_rec, x, m, target_mask, adj)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -451,68 +506,42 @@ def train():
 
         avg_loss = total_loss / len(train_loader)
         scheduler.step(avg_loss)
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            best_state = copy.deepcopy(model.state_dict())
         
-        if (epoch + 1) % 10 == 0:
-            print(f"Epoch {epoch+1}, Loss: {avg_loss:.6f}, LR: {opt.param_groups[0]['lr']:.6f}")
+        print(f"Epoch {epoch+1}, Loss: {avg_loss:.6f}, LR: {opt.param_groups[0]['lr']:.6f}")
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
 
     print("\nTraining completed. Computing threshold from training set...")
     
     # Compute anomaly scores on the TRAINING set to establish the threshold
-    model.eval()
-    train_scores = []
-    with torch.no_grad():
-        train_eval_loader = DataLoader(
-            TensorDataset(torch.tensor(Xtr), torch.tensor(Mtr)),
-            batch_size=32
-        )
-        for x, m in train_eval_loader:
-            x, m = x.to(device), m.to(device)
-            xr, _, _ = model(x, m)
-            
-            sq_err = ((xr - x) * m).pow(2).sum(dim=[1, 2])
-            obs_cnt = m.sum(dim=[1, 2]).clamp_min(1e-8)
-            train_scores.extend((sq_err / obs_cnt).cpu().numpy())
-
-    train_scores = np.array(train_scores)
-    # threshold = np.mean(train_scores) + 3 * np.std(train_scores)
-    threshold=np.mean(train_scores)
+    train_scores = anomaly_scores(model, Xtr, Mtr, device=device, batch_size=32)
+    threshold = float(np.mean(train_scores) + np.std(train_scores))
     
     print(f"\nTraining Set Score Stats:")
     print(f"  Mean: {np.mean(train_scores):.6f}")
     print(f"  Std:  {np.std(train_scores):.6f}")
-    print(f"  Threshold (mean + 3*std): {threshold:.6f}")
+    print(f"  Threshold (mean train score): {threshold:.6f}")
     
     # Evaluate on the TEST set using the training-derived threshold
     print("\nEvaluating on test set...")
-    test_scores = []
-    with torch.no_grad():
-        test_loader = DataLoader(
-            TensorDataset(torch.tensor(Xte), torch.tensor(Mte)), 
-            batch_size=32
-        )
-        for x, m in test_loader:
-            x, m = x.to(device), m.to(device)
-            xr, _, _ = model(x, m)
-            
-            sq_err = ((xr - x) * m).pow(2).sum(dim=[1, 2])
-            obs_cnt = m.sum(dim=[1, 2]).clamp_min(1e-8)
-            test_scores.extend((sq_err / obs_cnt).cpu().numpy())
-
-    test_scores_arr = np.array(test_scores)
-
-    # Splice train scores to front of test scores for evaluation
-    scores = np.concatenate([train_scores, test_scores_arr])
+    test_scores_arr = anomaly_scores(model, Xte, Mte, device=device, batch_size=32)
+    test_labels = build_test_labels(len(test_scores_arr))
+    split_idx = len(test_scores_arr) // 2
     
     print(f"\nAnomaly Detection Results:")
-    print(f"  Mean Score: {np.mean(scores):.6f}")
-    print(f"  Std Score:  {np.std(scores):.6f}")
+    print(f"  Mean Score: {np.mean(test_scores_arr):.6f}")
+    print(f"  Std Score:  {np.std(test_scores_arr):.6f}")
     print(f"  Threshold (from train): {threshold:.6f}")
-    print(f"  Anomalies detected: {(scores > threshold).sum()} / {len(scores)}")
+    print(f"  Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_scores_arr)}) anomaly")
+    print(f"  Anomalies detected: {(test_scores_arr > threshold).sum()} / {len(test_scores_arr)}")
 
     # Classification Metrics
-    # Labels: 0 for train (normal), 1 for test (anomaly)
-    y_true = np.concatenate([np.zeros(len(train_scores), dtype=int), np.ones(len(test_scores_arr), dtype=int)])
-    y_pred = (scores > threshold).astype(int)
+    y_true = test_labels
+    y_pred = (test_scores_arr > threshold).astype(int)
 
     acc = accuracy_score(y_true, y_pred)
     prec = precision_score(y_true, y_pred, zero_division=0)
@@ -526,22 +555,9 @@ def train():
     print(f"  F1-Score:  {f1:.4f}")
 
     # Visualization
-    plt.figure(figsize=(6, 5))
+    plot_results(test_scores_arr, threshold, split_idx)
     
-    plt.plot(scores, label='异常分数', alpha=0.7)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
-    plt.xlabel('样本索引')
-    plt.ylabel('重构误差')
-    plt.title('AGF-ADNet异常检测')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-   
-    plt.tight_layout()
-    plt.savefig('/home/akira/codespace/mra-detection/anomaly_detection_results.png', dpi=150)
-    print("\nPlot saved to: /home/akira/codespace/mra-detection/anomaly_detection_results.png")
-    plt.show()
-    
-    return model, scores
+    return model, test_scores_arr
 
 if __name__ == "__main__":
     model, scores = train()

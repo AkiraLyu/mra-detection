@@ -189,17 +189,19 @@ with torch.no_grad():
         (test_predictions - test_tensor_eval) ** 2, dim=[1, 2]
     ).cpu().numpy()
 
+test_split_idx = len(test_loss_dist) // 2
+test_labels = np.zeros(len(test_loss_dist), dtype=int)
+test_labels[test_split_idx:] = 1
+
 # 设定阈值
-threshold = np.mean(train_loss_dist) + 3 * np.std(train_loss_dist)
+threshold = float(np.mean(train_loss_dist))
 
 print(f"\n计算出的异常阈值: {threshold:.6f}")
 
-# Splice train scores to front of test scores for evaluation
-scores = np.concatenate([train_loss_dist, test_loss_dist])
-# Labels: 0 for train (normal), 1 for test (anomaly)
-y_true = np.concatenate([np.zeros(len(train_loss_dist), dtype=int), np.ones(len(test_loss_dist), dtype=int)])
-y_pred = (scores > threshold).astype(int)
+y_true = test_labels
+y_pred = (test_loss_dist > threshold).astype(int)
 
+print(f"测试集分界: [0:{test_split_idx}) normal, [{test_split_idx}:{len(test_loss_dist)}) anomaly")
 print(f"检测到的异常数量: {(y_pred == 1).sum()} / {len(y_pred)}")
 
 acc = accuracy_score(y_true, y_pred)
@@ -215,9 +217,10 @@ print(f"  F1-Score:  {f1:.4f}")
 
 # 可视化结果
 plt.figure(figsize=(6, 5))
-plt.plot(scores, label='异常分数', alpha=0.7)
+plt.plot(test_loss_dist, label='测试异常分数', alpha=0.7)
 plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
-plt.xlabel('样本索引')
+plt.axvline(x=test_split_idx, color='g', linestyle=':', label='测试集分界')
+plt.xlabel('测试样本索引')
 plt.ylabel('重构误差')
 plt.title('LSTM异常检测')
 plt.legend()

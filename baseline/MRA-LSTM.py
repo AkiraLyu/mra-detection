@@ -70,11 +70,11 @@ class SequenceDataset(Dataset):
             self.x_windows.append(window)
             self.y_windows.append(target)
 
-            # Label: training=0 (normal), test=1 (anomaly)
+            # Test data is defined as first half normal, latter half anomaly.
             if training:
                 self.labels.append(0)
             else:
-                self.labels.append(1)
+                self.labels.append(0 if i < n // 2 else 1)
 
     def __len__(self):
         return len(self.x_windows)
@@ -582,10 +582,12 @@ def evaluate_detection(errors, labels, threshold):
 
 def plot_anomaly_detection(errors, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """Plot anomaly detection results (reconstruction error + threshold) in mra.py style."""
+    split_idx = len(errors) // 2
     plt.figure(figsize=(6, 5))
-    plt.plot(errors, label='异常分数', alpha=0.7)
+    plt.plot(errors, label='测试异常分数', alpha=0.7)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
-    plt.xlabel('样本索引')
+    plt.axvline(x=split_idx, color='g', linestyle=':', label='测试集分界')
+    plt.xlabel('测试样本索引')
     plt.ylabel('重构误差')
     plt.title('MRA-LSTM异常检测')
     plt.legend()
@@ -678,27 +680,17 @@ def main():
     train_errors = compute_anomaly_scores_train(model, train_loader, device)
     print(f"Training error stats - mean: {train_errors.mean():.6f}, std: {train_errors.std():.6f}, max: {train_errors.max():.6f}")
 
-    # Compute threshold based on training data (e.g., 95th percentile of training errors)
-    #threshold_train = np.percentile(train_errors, 95)
-    threshold_train=np.mean(train_errors)
-    print(f"Training-based threshold (95th percentile): {threshold_train:.6f}")
+    threshold_train = float(np.mean(train_errors))
+    print(f"Training-based threshold (mean train score): {threshold_train:.6f}")
 
     # Compute anomaly scores on test data
     print("\nComputing test anomaly scores...")
     test_errors, labels, predictions, targets = compute_anomaly_scores(model, test_loader, device)
     print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
-
-    # Splice train errors to front of test errors for evaluation
-    all_errors = np.concatenate([train_errors, test_errors])
-
-    # Apply EWAF to smooth errors
-    smoothed_all_errors = apply_ewaf(all_errors, alpha=0.3)
-
-    # Labels: 0 for train (normal), 1 for test (anomaly)
-    all_labels = np.concatenate([np.zeros(len(train_errors), dtype=int), np.ones(len(test_errors), dtype=int)])
+    split_idx = len(test_errors) // 2
 
     # Evaluate detection using training-based threshold
-    metrics = evaluate_detection(smoothed_all_errors, all_labels, threshold_train)
+    metrics = evaluate_detection(test_errors, labels, threshold_train)
     print("\nDetection Performance (using training-based threshold):")
     print(f"  Accuracy:  {metrics['accuracy']:.4f}")
     print(f"  Precision: {metrics['precision']:.4f}")
@@ -706,10 +698,11 @@ def main():
     print(f"  F1-Score:  {metrics['f1']:.4f}")
     print(f"  Specificity: {metrics['specificity']:.4f}")
     print(f"  TP: {metrics['TP']}, TN: {metrics['TN']}, FP: {metrics['FP']}, FN: {metrics['FN']}")
+    print(f"  Test split: [0:{split_idx}) normal, [{split_idx}:{len(test_errors)}) anomaly")
 
     # Plot anomaly detection results
     print("\nPlotting anomaly detection results...")
-    plot_anomaly_detection(smoothed_all_errors, threshold_train)
+    plot_anomaly_detection(test_errors, threshold_train)
 
     # Save model
     torch.save(model.state_dict(), 'mra_lstm_model.pth')
