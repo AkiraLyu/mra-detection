@@ -66,7 +66,7 @@ class DatasetBuilder:
             shape = (0, self.seq_len, num_feat)
             return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
 
-        for i in range(0, n, self.stride):
+        for i in range(99, n, self.stride):
             if i < self.seq_len:
                 pad_len = self.seq_len - i - 1
                 window_data = np.concatenate([
@@ -343,6 +343,7 @@ class AGF_ADNet(nn.Module):
         super().__init__()
         self.num_nodes = num_nodes
         self.seq_len = seq_len
+        self.sampling_rate = sampling_rate
         
         self.graph = GraphLearner(num_nodes)
         
@@ -362,6 +363,7 @@ class AGF_ADNet(nn.Module):
         # Project each node's time series to d_model dimension
         self.input_proj = nn.Linear(num_nodes, d_model)
         self.pos_enc = nn.Parameter(torch.randn(1, seq_len, d_model))
+        self.sampling_rate_embedding = nn.Embedding(sampling_rate, d_model)
         
         encoder = nn.TransformerEncoderLayer(
             d_model=d_model, 
@@ -372,6 +374,9 @@ class AGF_ADNet(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder, num_layers=2)
         self.output_proj = nn.Linear(d_model, num_nodes)
+
+    def _build_sampling_type_index(self, seq_len, batch_size, device):
+        return torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1) % self.sampling_rate
 
     def forward(self, x, mask):
         # mask: 1 for missing, 0 for observed
@@ -397,7 +402,16 @@ class AGF_ADNet(nn.Module):
         x_filled = x * observed_mask + x_imp * mask
 
         # 5. Transformer Reconstruction
-        z = self.input_proj(x_filled) + self.pos_enc  # (B, S, d_model)
+        # Reuse the repository's sampling-rate encoding idea:
+        # type index -> embedding -> add to the transformer tokens.
+        seq_len = x_filled.size(1)
+        if seq_len > self.pos_enc.size(1):
+            raise ValueError(f"Input sequence length {seq_len} exceeds configured seq_len {self.pos_enc.size(1)}")
+        pos_enc = self.pos_enc[:, :seq_len]
+        sampling_types = self._build_sampling_type_index(seq_len, x_filled.size(0), x_filled.device)
+        sampling_rate_encoding = self.sampling_rate_embedding(sampling_types)
+
+        z = self.input_proj(x_filled) + pos_enc + sampling_rate_encoding  # (B, S, d_model)
         z = self.transformer(z)
         x_rec = self.output_proj(z)  # (B, S, N)
 
@@ -583,7 +597,7 @@ def train():
     
     # Compute anomaly scores on the TRAINING set to establish the threshold
     train_scores = anomaly_scores(model, Xtr, Mtr, device=device, batch_size=32)
-    threshold = float(np.mean(train_scores) + np.std(train_scores))
+    threshold = float(np.mean(train_scores) + 2 * np.std(train_scores))
     
     print(f"\nTraining Set Score Stats:")
     print(f"  Mean: {np.mean(train_scores):.6f}")
