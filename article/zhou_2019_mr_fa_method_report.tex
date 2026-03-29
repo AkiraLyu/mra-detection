@@ -1,0 +1,642 @@
+\documentclass[UTF8]{ctexart}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath,amssymb,mathtools,bm}
+\usepackage{booktabs,longtable,array}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    urlcolor=blue,
+    citecolor=black
+}
+
+\setlist[itemize]{leftmargin=2em}
+\setlist[enumerate]{leftmargin=2em}
+
+\title{《Multirate Factor Analysis Models for Fault Detection in Multirate Processes》方法报告}
+\author{}
+\date{2026-03-27}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section{文档目标}
+
+本文围绕 Zhou 等人在 2019 年提出的 MR-FA（Multirate Factor Analysis，多采样率因子分析）方法，给出一份面向工程实现的中文技术报告。报告重点回答四个问题：
+\begin{itemize}
+    \item 论文到底提出了什么模型；
+    \item 这个模型的输入、输出和中间量分别是什么，形状如何；
+    \item 训练和推理时的数据流是怎样流动的；
+    \item 相关数学原理应该如何理解，尤其是共享潜因子、EM 训练和故障检测统计量。
+\end{itemize}
+
+需要先说明一点：这篇论文本身不是深度学习论文，原文使用的是矩阵和向量记号，而不是神经网络里常见的“张量层”。因此，本文会在\textbf{保留论文原意}的基础上，把它\textbf{改写成工程上更容易实现的张量视角}。
+
+\section{方法总览}
+
+\subsection{一句话概括}
+
+MR-FA 的核心思想是：\textbf{把不同采样率的变量都看成由同一组潜在公共因子驱动}，只是不同采样率在不同时间点上是否观测到、每组变量的维数、噪声强度都不一样。模型通过共享潜因子把“同采样率内部相关性”和“不同采样率之间的相关性”统一起来，而不是先上采样/下采样再做普通 FA。
+
+\subsection{论文试图解决的问题}
+
+工业过程里常见三类变量：
+\begin{itemize}
+    \item 高频在线传感器变量；
+    \item 中频过程变量；
+    \item 低频实验室质量变量。
+\end{itemize}
+
+传统 MSPM 方法大多默认所有变量同频采样。常见补救方法是：
+\begin{itemize}
+    \item 下采样到最慢频率；
+    \item 上采样并插补慢变量；
+    \item 只用高频变量，忽略低频质量变量。
+\end{itemize}
+
+这些做法都会损失信息或者扭曲真实相关结构。MR-FA 的目标就是直接在多采样率观测上建模，而不强行把数据压成单一频率。
+
+\section{从 FA 到 MR-FA}
+
+\subsection{单速率 FA 回顾}
+
+普通因子分析（FA）假设观测向量 $\bm{x} \in \mathbb{R}^{M}$ 来自一个低维潜变量 $\bm{t} \in \mathbb{R}^{D}$：
+\begin{equation}
+    \bm{x} = \bm{\Psi}\bm{t} + \bm{\varepsilon},
+\end{equation}
+其中：
+\begin{itemize}
+    \item $\bm{\Psi} \in \mathbb{R}^{M \times D}$ 是因子载荷矩阵；
+    \item $\bm{t} \sim \mathcal{N}(\bm{0}, \bm{I})$；
+    \item $\bm{\varepsilon} \sim \mathcal{N}(\bm{0}, \bm{\Omega})$；
+    \item $\bm{\Omega}$ 是对角阵，而不是 PPCA 中的 $\sigma^2 \bm{I}$。
+\end{itemize}
+
+这意味着 FA 允许每个变量拥有不同噪声方差，因此比 PPCA 的各向同性噪声假设更灵活。
+
+\subsection{MR-FA 的关键变化}
+
+对多采样率情形，论文把单个 FA 扩展为 $N$ 个采样率组：
+\begin{equation}
+    \bm{x}_n(k) = \bm{\Psi}_n \bm{t}(k) + \bm{\xi}_n(k), \quad n = 1,2,\dots,N.
+\end{equation}
+
+这里最关键的不是“有 $N$ 个方程”，而是\textbf{所有采样率组共享同一个时刻的潜因子 $\bm{t}(k)$}。也就是说：
+\begin{itemize}
+    \item 第 $n$ 组变量有自己的载荷矩阵 $\bm{\Psi}_n$；
+    \item 第 $n$ 组变量有自己的对角噪声协方差 $\bm{\Omega}_n$；
+    \item 但它们在同一个全局时间索引 $k$ 上由同一潜状态 $\bm{t}(k)$ 驱动。
+\end{itemize}
+
+这使得跨采样率相关性不需要显式写成交叉协方差块，而是通过共享潜因子自然耦合起来。
+
+\section{符号与张量形状}
+
+\subsection{论文原始表示}
+
+设整个系统包含 $N$ 个采样率组，第 $n$ 组数据矩阵为
+\begin{equation}
+    \bm{X}_n \in \mathbb{R}^{K_n \times M_n},
+\end{equation}
+其中：
+\begin{itemize}
+    \item $K_n$ 是第 $n$ 个采样率组实际采到的样本数；
+    \item $M_n$ 是第 $n$ 个采样率组包含的变量个数。
+\end{itemize}
+
+论文再引入一个\textbf{全局时间轴}，长度记为 $K$，满足
+\begin{equation}
+    K \ge \max(K_1,\dots,K_N),
+\end{equation}
+并且每个全局时间点 $k$ 至少有一组变量被采到。
+
+\subsection{核心符号表}
+
+\begin{longtable}{>{\raggedright\arraybackslash}p{0.18\linewidth} >{\raggedright\arraybackslash}p{0.22\linewidth} >{\raggedright\arraybackslash}p{0.50\linewidth}}
+\toprule
+符号 & 形状 & 含义 \\
+\midrule
+\endhead
+$N$ & 标量 & 采样率组个数 \\
+$M_n$ & 标量 & 第 $n$ 组变量维度 \\
+$K_n$ & 标量 & 第 $n$ 组实际采样次数 \\
+$K$ & 标量 & 统一后的全局时间步数 \\
+$D$ & 标量 & 公共潜因子维度 \\
+$\bm{x}_n(k)$ & $\mathbb{R}^{M_n}$ & 第 $n$ 组在全局时刻 $k$ 的观测向量 \\
+$\bm{X}_n$ & $\mathbb{R}^{K_n \times M_n}$ & 第 $n$ 组完整训练数据矩阵 \\
+$\phi_{k,n}$ & $\{0,1\}$ & 采样指示器，表示时刻 $k$ 是否观测到第 $n$ 组 \\
+$\bm{X}_o(k)$ & $\mathbb{R}^{m_k}$ & 时刻 $k$ 所有已观测组拼接后的向量，$m_k=\sum_n \phi_{k,n}M_n$ \\
+$\bm{t}(k)$ & $\mathbb{R}^{D}$ & 时刻 $k$ 的公共潜因子 \\
+$\hat{\bm{t}}(k)$ & $\mathbb{R}^{D}$ & 潜因子后验均值 \\
+$\bm{\Psi}_n$ & $\mathbb{R}^{M_n \times D}$ & 第 $n$ 组载荷矩阵 \\
+$\bm{\Omega}_n$ & $\mathbb{R}^{M_n \times M_n}$ & 第 $n$ 组噪声协方差，对角阵 \\
+$\bm{\Sigma}(k)$ & $\mathbb{R}^{D \times D}$ & 论文符号中的后验精度矩阵 \\
+$\mathbb{E}[\bm{t}(k)\bm{t}(k)^\top \mid \bm{X}_o(k)]$ & $\mathbb{R}^{D \times D}$ & 后验二阶矩 \\
+$T^2(k)$ & 标量 & 公共因子子空间监控统计量 \\
+$\mathrm{SPE}_n(k)$ & 标量 & 第 $n$ 组残差平方统计量 \\
+\bottomrule
+\end{longtable}
+
+\subsection{工程实现视角下的张量化表示}
+
+论文的原始输入并不是单个规整的三维张量，因为不同采样率组的维数 $M_n$ 往往不同。因此最自然的实现方式其实是：
+\begin{equation}
+    \{\bm{X}_1,\bm{X}_2,\dots,\bm{X}_N\},
+\end{equation}
+也就是一个“矩阵列表”。
+
+如果为了向量化实现，也可以构造填充后的张量：
+\begin{equation}
+    \mathcal{X}_{\mathrm{pad}} \in \mathbb{R}^{K \times N \times M_{\max}}, \quad M_{\max}=\max_n M_n,
+\end{equation}
+并配套使用掩码：
+\begin{equation}
+    \mathcal{M}_{\mathrm{pad}} \in \{0,1\}^{K \times N \times M_{\max}},
+\end{equation}
+以及组级采样指示器：
+\begin{equation}
+    \bm{\Phi} \in \{0,1\}^{K \times N}.
+\end{equation}
+
+\paragraph{结论}
+从论文角度看，\textbf{输入不是一个标准 dense tensor，而是多组不同形状矩阵加一个全局时间对齐机制}；从工程角度看，可以把它实现成“填充张量 + 掩码”或“按组存储 + 观测模式分桶”。
+
+\section{模型输入、输出与中间结果}
+
+\subsection{训练输入}
+
+训练集由正常工况数据组成，输入包括：
+\begin{itemize}
+    \item 多采样率观测集合 $\{\bm{X}_n\}_{n=1}^{N}$；
+    \item 全局时间轴上的采样指示器 $\phi_{k,n}$。
+\end{itemize}
+
+如果按统一时间轴表示，则单个时间步的输入是：
+\begin{equation}
+    \left\{\bm{x}_n(k), \phi_{k,n}\right\}_{n=1}^{N}.
+\end{equation}
+真正参与当前步推断的观测是拼接向量 $\bm{X}_o(k)$。
+
+\subsection{训练输出}
+
+训练结束后得到的不是类别标签，而是一个生成式监测模型：
+\begin{itemize}
+    \item 各组载荷矩阵 $\{\bm{\Psi}_n\}_{n=1}^{N}$；
+    \item 各组噪声协方差 $\{\bm{\Omega}_n\}_{n=1}^{N}$；
+    \item 训练数据上各时刻的后验因子均值 $\hat{\bm{t}}(k)$；
+    \item 每个时刻的 $T^2$ 统计量和每个采样率组对应的 $\mathrm{SPE}_n$ 统计量；
+    \item 基于训练分布估计出的控制限。
+\end{itemize}
+
+\subsection{测试时输出}
+
+对新时刻 $k_{\text{new}}$ 的观测，模型输出：
+\begin{itemize}
+    \item 因子估计 $\hat{\bm{t}}(k_{\text{new}}) \in \mathbb{R}^{D}$；
+    \item 公共子空间统计量 $T^2(k_{\text{new}})$；
+    \item 每个采样率组的残差统计量 $\mathrm{SPE}_n(k_{\text{new}})$。
+\end{itemize}
+
+如果批量处理 $K_{\text{test}}$ 个测试时刻，那么：
+\begin{equation}
+    \hat{\bm{T}} \in \mathbb{R}^{K_{\text{test}} \times D}, \quad
+    \bm{t}^2 \in \mathbb{R}^{K_{\text{test}}}, \quad
+    \mathrm{SPE} \in \mathbb{R}^{K_{\text{test}} \times N}.
+\end{equation}
+
+\section{MR-FA 的数学结构}
+
+\subsection{生成模型}
+
+MR-FA 在每个时间步上是一个线性高斯潜变量模型。对第 $n$ 个采样率组：
+\begin{equation}
+    \bm{x}_n(k) = \bm{\Psi}_n \bm{t}(k) + \bm{\xi}_n(k),
+\end{equation}
+其中
+\begin{align}
+    \bm{t}(k) &\sim \mathcal{N}(\bm{0}, \bm{I}), \\
+    \bm{\xi}_n(k) &\sim \mathcal{N}(\bm{0}, \bm{\Omega}_n), \\
+    \bm{\Omega}_n &= \operatorname{diag}(\omega_{n,1},\dots,\omega_{n,M_n}).
+\end{align}
+
+这意味着：
+\begin{itemize}
+    \item 潜因子之间先验不相关；
+    \item 同组变量的噪声在论文里被假设为相互独立；
+    \item 不同组之间的统计耦合不是通过噪声项给出，而是通过共享潜因子给出。
+\end{itemize}
+
+\subsection{采样指示器的作用}
+
+由于某些组在时刻 $k$ 没有采到，所以后验推断不能直接把所有组硬拼起来。论文用
+\begin{equation}
+    \phi_{k,n} =
+    \begin{cases}
+        1, & \text{时刻 } k \text{ 观测到第 } n \text{ 组}, \\
+        0, & \text{否则}
+    \end{cases}
+\end{equation}
+来决定当前时刻有哪些组参与推断。
+
+因此，MR-FA 是一个\textbf{结构随时间变化的模型}：时刻 $k$ 真正生效的并不是全部参数块，而是所有满足 $\phi_{k,n}=1$ 的那部分参数块。这也是论文把 MR-FA 视为一种特殊时变模型的原因。
+
+\subsection{后验推断}
+
+固定当前参数 $\{\bm{\Psi}_n,\bm{\Omega}_n\}$ 时，时刻 $k$ 的潜因子后验均值为：
+\begin{equation}
+    \hat{\bm{t}}(k)
+    =
+    \bm{\Sigma}(k)^{-1}
+    \sum_{n=1}^{N}
+    \phi_{k,n}\bm{\Psi}_n^\top \bm{\Omega}_n^{-1}\bm{x}_n(k).
+\end{equation}
+
+其中
+\begin{equation}
+    \bm{\Sigma}(k)
+    =
+    \sum_{n=1}^{N}
+    \phi_{k,n}\bm{\Psi}_n^\top \bm{\Omega}_n^{-1}\bm{\Psi}_n
+    + \bm{I}.
+\end{equation}
+
+后验二阶矩为：
+\begin{equation}
+    \mathbb{E}\!\left[\bm{t}(k)\bm{t}(k)^\top \mid \bm{X}_o(k)\right]
+    =
+    \bm{\Sigma}(k)^{-1}
+    + \hat{\bm{t}}(k)\hat{\bm{t}}(k)^\top.
+\end{equation}
+
+\paragraph{一个容易混淆但很重要的点}
+论文把 $\bm{\Sigma}(k)$ 记成了一个类似“协方差”的符号，但从公式结构看，它实际上是\textbf{后验精度矩阵}，因为真正的后验协方差是 $\bm{\Sigma}(k)^{-1}$。这一点在阅读公式和做代码实现时必须分清。
+
+\section{张量形状分析}
+
+\subsection{单时间步上的形状传播}
+
+对某个时刻 $k$，第 $n$ 组的关键量形状如下：
+\begin{align}
+    \bm{x}_n(k) &: M_n \times 1, \\
+    \bm{\Psi}_n &: M_n \times D, \\
+    \bm{\Omega}_n^{-1} &: M_n \times M_n, \\
+    \bm{\Psi}_n^\top \bm{\Omega}_n^{-1} \bm{x}_n(k) &: D \times 1.
+\end{align}
+
+于是多组贡献求和后得到：
+\begin{equation}
+    \sum_{n=1}^{N}\phi_{k,n}\bm{\Psi}_n^\top \bm{\Omega}_n^{-1} \bm{x}_n(k)
+    \in \mathbb{R}^{D}.
+\end{equation}
+
+再乘上 $\bm{\Sigma}(k)^{-1}\in\mathbb{R}^{D\times D}$，得到
+\begin{equation}
+    \hat{\bm{t}}(k)\in\mathbb{R}^{D}.
+\end{equation}
+
+\subsection{M 步中的形状传播}
+
+固定第 $n$ 组，更新载荷矩阵时：
+\begin{equation}
+    \hat{\bm{\Psi}}_n
+    =
+    \left(
+        \sum_{k=1}^{K}
+        \phi_{k,n}\bm{x}_n(k)\hat{\bm{t}}(k)^\top
+    \right)
+    \left(
+        \sum_{k=1}^{K}
+        \phi_{k,n}
+        \mathbb{E}\!\left[\bm{t}(k)\bm{t}(k)^\top \mid \bm{X}_o(k)\right]
+    \right)^{-1}.
+\end{equation}
+
+其中：
+\begin{itemize}
+    \item $\bm{x}_n(k)\hat{\bm{t}}(k)^\top$ 的形状是 $M_n \times D$；
+    \item 分母是 $D \times D$；
+    \item 所以最终 $\hat{\bm{\Psi}}_n$ 形状仍是 $M_n \times D$。
+\end{itemize}
+
+噪声协方差更新为：
+\begin{equation}
+    \hat{\bm{\Omega}}_n
+    =
+    \operatorname{diag}
+    \left(
+        \bm{S}_n
+        -
+        \frac{1}{K_n}
+        \sum_{k=1}^{K}
+        \phi_{k,n}\hat{\bm{\Psi}}_n \hat{\bm{t}}(k)\bm{x}_n(k)^\top
+    \right),
+\end{equation}
+其中
+\begin{equation}
+    \bm{S}_n = \frac{1}{K_n}\sum_{k=1}^{K_n}\bm{x}_n(k)\bm{x}_n(k)^\top \in \mathbb{R}^{M_n \times M_n}.
+\end{equation}
+
+\subsection{批量实现时最常见的张量}
+
+若按工程代码批量实现，一般会出现下列张量：
+\begin{itemize}
+    \item 观测模式矩阵 $\bm{\Phi}\in\{0,1\}^{K\times N}$；
+    \item 后验均值矩阵 $\hat{\bm{T}}\in\mathbb{R}^{K\times D}$；
+    \item 后验精度张量 $\mathcal{P}\in\mathbb{R}^{K\times D\times D}$；
+    \item 后验协方差张量 $\mathcal{C}\in\mathbb{R}^{K\times D\times D}$；
+    \item 二阶矩张量 $\mathcal{S}\in\mathbb{R}^{K\times D\times D}$；
+    \item 监测统计量 $\bm{t}^2\in\mathbb{R}^{K}$；
+    \item 残差统计量矩阵 $\mathrm{SPE}\in\mathbb{R}^{K\times N}$。
+\end{itemize}
+
+\paragraph{对应到仓库实现}
+仓库中的 \texttt{baseline/mr\_fa.py} 基本就是这个张量化思路：
+\begin{itemize}
+    \item \texttt{phi}: $(K,N)$；
+    \item \texttt{means}: $(K,D)$；
+    \item \texttt{precisions}: $(K,D,D)$；
+    \item \texttt{covariances}: $(K,D,D)$；
+    \item \texttt{second\_moments}: $(K,D,D)$；
+    \item \texttt{spe}: $(K,N)$。
+\end{itemize}
+
+\section{训练数据流：从输入到参数更新}
+
+\subsection{总流程}
+
+MR-FA 的训练可以写成下面的数据流：
+\begin{equation}
+    \{\bm{X}_n\}_{n=1}^{N}
+    \longrightarrow
+    \{\bm{X}_o(k), \phi_{k,:}\}_{k=1}^{K}
+    \xrightarrow{\text{E-step}}
+    \{\hat{\bm{t}}(k), \mathbb{E}[\bm{t}(k)\bm{t}(k)^\top]\}_{k=1}^{K}
+    \xrightarrow{\text{M-step}}
+    \{\bm{\Psi}_n,\bm{\Omega}_n\}_{n=1}^{N}.
+\end{equation}
+
+训练只使用正常工况数据，因此本质上是一个无监督建模过程。
+
+\subsection{E 步：估计隐因子后验}
+
+在 E 步，参数固定，逐时刻推断公共因子。可以把它理解为：
+\begin{enumerate}
+    \item 先看当前时刻有哪些组被观测到；
+    \item 把这些组各自对潜因子的“证据”映射到 $D$ 维潜空间；
+    \item 把所有证据相加；
+    \item 再乘以后验协方差，得到当前时刻的最佳因子估计。
+\end{enumerate}
+
+由于模型是线性高斯的，上述结果是标准高斯共轭推断的闭式解。
+
+\subsection{M 步：更新载荷和噪声}
+
+在 M 步，潜因子后验矩固定，用最大似然更新参数：
+\begin{itemize}
+    \item $\bm{\Psi}_n$ 由“观测与潜因子”的交叉矩估计；
+    \item $\bm{\Omega}_n$ 由该组的残差协方差对角部分估计。
+\end{itemize}
+
+注意这里虽然更新是按组进行的，但\textbf{每个组的更新并不是只用本组数据}。原因在于：
+\begin{itemize}
+    \item $\hat{\bm{t}}(k)$ 是由当前时刻\textbf{所有已观测组}共同决定的；
+    \item 所以一旦第 $n$ 组在时刻 $k$ 出现，它的参数更新就间接受到了其他组观测的影响。
+\end{itemize}
+
+这正是论文强调的“MR-FA 不等价于多个独立 FA”的根本原因。
+
+\subsection{为什么这能建模跨采样率相关性}
+
+如果为每个采样率单独训练一个 FA：
+\begin{itemize}
+    \item 每组只看到自己；
+    \item 每组有自己的潜因子；
+    \item 组间没有共享隐状态，因此无法利用跨组共现信息。
+\end{itemize}
+
+MR-FA 则相反：
+\begin{itemize}
+    \item 各组有各自的观测头 $\bm{\Psi}_n$；
+    \item 但共享同一潜空间 $\bm{t}(k)$；
+    \item 只要多个采样率在某些时间点共现，它们就会通过同一个 $\bm{t}(k)$ 彼此约束。
+\end{itemize}
+
+\section{推理与故障检测数据流}
+
+\subsection{测试时的因子推断}
+
+对新时刻 $k_{\text{new}}$ 的观测，仍然使用与训练 E 步相同的后验推断公式：
+\begin{equation}
+    \hat{\bm{t}}(k_{\text{new}})
+    =
+    \bm{\Sigma}(k_{\text{new}})^{-1}
+    \sum_{n=1}^{N}
+    \phi_{k_{\text{new}},n}
+    \bm{\Psi}_n^\top \bm{\Omega}_n^{-1}\bm{x}_n(k_{\text{new}}).
+\end{equation}
+
+\subsection{公共子空间统计量 $T^2$}
+
+论文定义：
+\begin{equation}
+    T^2(k_{\text{new}})
+    =
+    \hat{\bm{t}}(k_{\text{new}})^\top
+    \bm{\Sigma}(k_{\text{new}})^{-1}
+    \hat{\bm{t}}(k_{\text{new}}).
+\end{equation}
+
+直观上，$T^2$ 衡量的是“当前样本在公共潜空间中偏离正常模式的程度”。如果一个故障会显著改变多个采样率共享的潜在机理，那么它往往会首先在 $T^2$ 上表现出来。
+
+\subsection{残差统计量 $\mathrm{SPE}$}
+
+对每个采样率组，先做重构：
+\begin{equation}
+    \hat{\bm{x}}_n(k) = \bm{\Psi}_n \hat{\bm{t}}(k),
+\end{equation}
+再计算残差：
+\begin{equation}
+    \bm{e}_n(k) = \bm{x}_n(k) - \hat{\bm{x}}_n(k),
+\end{equation}
+最后得到
+\begin{equation}
+    \mathrm{SPE}_n(k) = \bm{e}_n(k)^\top \bm{e}_n(k).
+\end{equation}
+
+$\mathrm{SPE}_n$ 反映的是“第 $n$ 组变量中无法被共享潜因子解释的那部分能量”。因此：
+\begin{itemize}
+    \item $T^2$ 更偏向监控共享子空间；
+    \item $\mathrm{SPE}_n$ 更偏向监控各组残差子空间。
+\end{itemize}
+
+\subsection{控制限}
+
+论文采用：
+\begin{itemize}
+    \item $T^2$ 的控制限由 $F$ 分布估计；
+    \item $\mathrm{SPE}_n$ 的控制限由卡方分布估计。
+\end{itemize}
+
+因此完整检测流程可以写成：
+\begin{equation}
+    \text{新观测}
+    \rightarrow
+    \hat{\bm{t}}
+    \rightarrow
+    \left(T^2,\mathrm{SPE}_1,\dots,\mathrm{SPE}_N\right)
+    \rightarrow
+    \text{与控制限比较}
+    \rightarrow
+    \text{报警/不报警}.
+\end{equation}
+
+\section{几何解释}
+
+\subsection{单个 FA 的几何意义}
+
+单个 FA 可以理解为：在 $M$ 维观测空间中寻找一个 $D$ 维超平面，让样本投影到这个平面后，尽可能保留原始变量之间的相关结构。观测向量可以分解为：
+\begin{equation}
+    \bm{x} = \hat{\bm{x}} + \bm{\xi},
+\end{equation}
+其中 $\hat{\bm{x}}$ 是投影部分，$\bm{\xi}$ 是残差。
+
+\subsection{MR-FA 的几何意义}
+
+MR-FA 不是分别给每个采样率找一个超平面，而是让\textbf{所有采样率组共享同一个潜在超平面}。因此它优化的不是某一组内部的局部误差最小，而是所有采样率组总体残差协方差的全局最小。
+
+论文的几何解释可以概括为：
+\begin{itemize}
+    \item 先只用一种采样率时，会得到一个超平面；
+    \item 再加入另一种采样率后，最优超平面会旋转；
+    \item 这个旋转的结果，是为了让所有采样率组在同一个共享潜空间上达到更好的整体拟合。
+\end{itemize}
+
+这个观点很重要，因为它解释了为什么 MR-FA 与“多个独立 FA 模型”在本质上不同。
+
+\section{与其他方法的差异}
+
+\subsection{与下采样/上采样方法的差异}
+
+MR-FA 不先把所有变量压成同频数据，因此避免了两个问题：
+\begin{itemize}
+    \item 下采样导致高频信息损失；
+    \item 上采样导致人工插值破坏真实相关性。
+\end{itemize}
+
+\subsection{与多个独立 FA 的差异}
+
+独立 FA 的问题是每组潜因子互不共享，因此：
+\begin{itemize}
+    \item 不能显式学习跨采样率相关性；
+    \item 低频质量变量无法反向约束高频过程变量的潜空间；
+    \item 最终更像多个局部模型，而不是一个统一过程模型。
+\end{itemize}
+
+\subsection{与 MRPCA 的差异}
+
+论文把 MR-FA 与之前的 MRPCA 进行了比较。最关键的差异是：
+\begin{itemize}
+    \item MRPCA 仍然继承了 PPCA 风格的各向同性噪声假设；
+    \item MR-FA 允许每个变量有自己的噪声方差，因此对工业数据更现实。
+\end{itemize}
+
+对工业过程数据而言，不同变量的噪声幅值差异通常很大，所以这一点确实重要。
+
+\section{方法的优点、假设与局限}
+
+\subsection{优点}
+
+\begin{itemize}
+    \item 不需要先统一采样率；
+    \item 共享潜因子，能同时利用组内和组间相关性；
+    \item 比 MRPCA 更灵活，因为噪声方差不是各向同性；
+    \item 输出既有潜空间统计量 $T^2$，也有分组残差统计量 $\mathrm{SPE}_n$，监测解释性较好。
+\end{itemize}
+
+\subsection{核心假设}
+
+\begin{itemize}
+    \item 线性生成关系：$\bm{x}_n=\bm{\Psi}_n\bm{t}+\bm{\xi}_n$；
+    \item 潜因子服从标准高斯先验；
+    \item 每组内部噪声协方差为对角阵；
+    \item 不同采样率的耦合主要通过共享潜因子，而不是通过动态时序模型显式建模。
+\end{itemize}
+
+\subsection{局限}
+
+\begin{itemize}
+    \item 这是静态线性模型，不直接建模时间动态；
+    \item 如果不同采样率互为互素并且共现很少，跨组耦合会变弱；
+    \item 对角噪声协方差仍然是一种简化，无法表示同组变量残差之间的相关噪声；
+    \item EM 只能保证收敛到局部最优。
+\end{itemize}
+
+\section{面向实现的数据流总结}
+
+\subsection{训练期}
+
+用更接近代码的方式，训练流程可以概括为：
+\begin{enumerate}
+    \item 读入各采样率组数据 $\{\bm{X}_n\}$；
+    \item 建立全局时间轴，并生成组级观测掩码 $\bm{\Phi}$；
+    \item 初始化 $\{\bm{\Psi}_n,\bm{\Omega}_n\}$；
+    \item 对每个观测模式重复执行 E 步，得到所有时刻的 $\hat{\bm{t}}(k)$ 和二阶矩；
+    \item 对每个采样率组执行 M 步，更新 $\bm{\Psi}_n,\bm{\Omega}_n$；
+    \item 重复 4--5 直到对数似然收敛；
+    \item 在训练集上计算 $T^2$ 和 $\mathrm{SPE}_n$ 的控制限。
+\end{enumerate}
+
+\subsection{推理期}
+
+\begin{enumerate}
+    \item 输入新时刻的多采样率观测；
+    \item 根据当前观测模式计算 $\hat{\bm{t}}$；
+    \item 对每个已观测组做重构并求残差；
+    \item 输出 $T^2$ 和各组 $\mathrm{SPE}_n$；
+    \item 与控制限比较，给出报警结果。
+\end{enumerate}
+
+\subsection{如果一定要写成“输入张量 $\rightarrow$ 输出张量”}
+
+可以写成：
+\begin{align}
+    \mathcal{X}_{\mathrm{pad}} &\in \mathbb{R}^{K \times N \times M_{\max}}, \\
+    \bm{\Phi} &\in \{0,1\}^{K \times N}, \\
+    \hat{\bm{T}} &\in \mathbb{R}^{K \times D}, \\
+    \mathcal{C} &\in \mathbb{R}^{K \times D \times D}, \\
+    \mathrm{SPE} &\in \mathbb{R}^{K \times N}.
+\end{align}
+
+但要强调：\textbf{这只是工程上的统一封装方式，不是论文最原生的数学表达}。论文原生表达更接近“多组矩阵 + 条件观测模式”。
+
+\section{论文实验结论简述}
+
+论文用两个案例验证方法：
+\begin{itemize}
+    \item Tennessee--Eastman 模拟过程；
+    \item 造纸废水处理中的 R2S 厌氧反应器真实数据。
+\end{itemize}
+
+整体结论是：
+\begin{itemize}
+    \item MR-FA 普遍优于下采样 FA、只用高频变量的 FA，以及早期的 MRPCA；
+    \item 尤其在需要依赖低频质量变量才能识别的故障上，MR-FA 的优势更明显；
+    \item 论文将性能优势主要归因于两点：完整利用多采样率信息，以及更合理的异方差噪声建模。
+\end{itemize}
+
+\section{结论}
+
+MR-FA 可以看成是\textbf{多采样率场景下的共享潜因子生成模型}。它的本质不是补齐缺失数据，也不是给每种采样率单独建模，而是在统一时间轴上用一个共享潜空间解释所有可见观测。对工程实现而言，最重要的理解有三点：
+\begin{itemize}
+    \item 输入本质上是“多组不同形状矩阵 + 采样指示器”，不是天然规则的单张量；
+    \item 模型的核心输出是各时刻公共因子后验、各组载荷矩阵与噪声方差，以及由此得到的 $T^2/\mathrm{SPE}$ 统计量；
+    \item 整个数据流由“观测模式 $\rightarrow$ 后验因子 $\rightarrow$ 参数更新/残差统计”三段组成，其中跨采样率信息融合发生在共享潜因子的后验推断阶段。
+\end{itemize}
+
+\end{document}

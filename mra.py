@@ -88,32 +88,94 @@ class DatasetBuilder:
 
 
 # ==========================================
-# 2. FIXED: Enhanced Graph Learner
+# 2. Adaptive Graph Learner
 # ==========================================
 class GraphLearner(nn.Module):
-    """
-    FIXED: Removed softmax to allow true sparsity enforcement.
-    Uses row-wise normalization after ReLU instead.
-    """
-    def __init__(self, num_nodes, embed_dim=16, alpha=3.0):
+    def __init__(self, num_nodes, hidden_dim=32, static_dim=8, coord_dim=8, self_loop_weight=1.0, base_adj=None):
         super().__init__()
-        self.E1 = nn.Parameter(torch.randn(num_nodes, embed_dim))
-        self.E2 = nn.Parameter(torch.randn(num_nodes, embed_dim))
-        self.alpha = alpha
+        self.num_nodes = num_nodes
+        self.self_loop_weight = self_loop_weight
 
-    def forward(self):
-        M1 = torch.tanh(self.alpha * self.E1)
-        M2 = torch.tanh(self.alpha * self.E2)
-        A = torch.matmul(M1, M2.T)
-        A = F.relu(A)
-        
-        # FIXED: Row-wise normalization instead of softmax
-        # This allows L1 sparsity to have effect while maintaining normalized weights
-        A = A / (A.sum(dim=-1, keepdim=True) + 1e-8)
-        return A
+        if base_adj is None:
+            self.register_buffer("base_adj", None)
+        else:
+            self.register_buffer("base_adj", base_adj.float())
+
+        # Static node descriptors stand in for POI-like metadata.
+        self.static_context = nn.Parameter(torch.randn(num_nodes, static_dim))
+        # Learned node coordinates define a reusable inverse-distance prior.
+        self.node_coords = nn.Parameter(torch.randn(num_nodes, coord_dim))
+
+        dynamic_dim = 4  # mean, std, last observed value, missing ratio
+        self.node_encoder = nn.Sequential(
+            nn.Linear(dynamic_dim + static_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def _build_prior_adjacency(self, device, dtype):
+        eye = torch.eye(self.num_nodes, device=device, dtype=dtype)
+        if self.base_adj is not None:
+            prior = self.base_adj.to(device=device, dtype=dtype).clamp_min(0.0)
+            prior = prior * (1.0 - eye)
+            return prior
+
+        dist = torch.cdist(self.node_coords, self.node_coords, p=2)
+        prior = 1.0 / (1.0 + dist)
+        prior = prior * (1.0 - eye)
+        return prior
+
+    def _last_observed(self, x, observed):
+        # Pick the most recent observed value per node; fall back to the first step if all missing.
+        time_index = torch.arange(x.size(1), device=x.device, dtype=x.dtype).view(1, -1, 1)
+        latest_index = (time_index * observed).argmax(dim=1).long()  # (B, N)
+        return x.gather(1, latest_index.unsqueeze(1)).squeeze(1)
+
+    def _dynamic_context(self, x, mask):
+        observed = 1.0 - mask
+        count = observed.sum(dim=1).clamp_min(1.0)
+        mean = (x * observed).sum(dim=1) / count
+
+        centered = (x - mean.unsqueeze(1)) * observed
+        std = torch.sqrt(centered.pow(2).sum(dim=1) / count + 1e-6)
+        last = self._last_observed(x, observed)
+        missing_ratio = mask.mean(dim=1)
+        return torch.stack([mean, std, last, missing_ratio], dim=-1)
+
+    def forward(self, x, mask=None):
+        if mask is None:
+            mask = torch.zeros_like(x)
+
+        batch_size = x.size(0)
+        node_dynamic = self._dynamic_context(x, mask)
+        node_static = self.static_context.unsqueeze(0).expand(batch_size, -1, -1)
+        node_features = torch.cat([node_dynamic, node_static], dim=-1)
+        node_repr = self.node_encoder(node_features)  # (B, N, H)
+
+        h_i = node_repr.unsqueeze(2).expand(-1, -1, self.num_nodes, -1)
+        h_j = node_repr.unsqueeze(1).expand(-1, self.num_nodes, -1, -1)
+        pair_features = torch.cat([h_i, h_j, torch.abs(h_i - h_j), h_i * h_j], dim=-1)
+
+        edge_modifier = F.relu(self.edge_mlp(pair_features).squeeze(-1))  # (B, N, N)
+        prior = self._build_prior_adjacency(x.device, x.dtype).unsqueeze(0)
+        adapt_adj = edge_modifier * prior
+
+        eye = torch.eye(self.num_nodes, device=x.device, dtype=x.dtype).unsqueeze(0)
+        adapt_adj = adapt_adj + eye * self.self_loop_weight
+
+        degree = adapt_adj.sum(dim=-1).clamp_min(1e-6)
+        inv_sqrt_degree = degree.pow(-0.5)
+        norm_adj = inv_sqrt_degree.unsqueeze(-1) * adapt_adj * inv_sqrt_degree.unsqueeze(-2)
+        return norm_adj
 
 # ==========================================
-# 3. GCN Layer (Unchanged)
+# 3. GCN Layer
 # ==========================================
 class GCNLayer(nn.Module):
     def __init__(self, in_dim, out_dim):
@@ -123,7 +185,10 @@ class GCNLayer(nn.Module):
     def forward(self, x, adj):
         # x: (B, S, N, F)
         x = self.linear(x)
-        out = torch.einsum("nm,bsmd->bsnd", adj, x)
+        if adj.dim() == 2:
+            out = torch.einsum("nm,bsmd->bsnd", adj, x)
+        else:
+            out = torch.einsum("bnm,bsmd->bsnd", adj, x)
         return out
 
 # ==========================================
@@ -274,7 +339,7 @@ class GatedFusion(nn.Module):
 # 7. AGF-ADNet (Fixed Integration)
 # ==========================================
 class AGF_ADNet(nn.Module):
-    def __init__(self, num_nodes=18, seq_len=60, d_model=64):
+    def __init__(self, num_nodes=18, seq_len=60, d_model=64, sampling_rate=6):
         super().__init__()
         self.num_nodes = num_nodes
         self.seq_len = seq_len
@@ -311,7 +376,7 @@ class AGF_ADNet(nn.Module):
     def forward(self, x, mask):
         # mask: 1 for missing, 0 for observed
         # x: (B, S, N)
-        adj = self.graph()
+        adj = self.graph(x, mask)
 
         # 1. Time Branch
         x_gcn = self.gcn(x.unsqueeze(-1), adj).squeeze(-1)  # (B, S, N)
@@ -367,7 +432,7 @@ def dual_domain_loss(x_rec, x_true, missing_mask, target_mask, adj, freq_weight=
     else:
         freq_loss = torch.tensor(0.0, device=x_rec.device)
     
-    # Row-normalized non-negative adjacency makes L1 nearly constant, so use entropy instead.
+    # Encourage concentrated connectivity without hard thresholding.
     sparsity_loss = -(adj * torch.log(adj + 1e-8)).sum(dim=-1).mean()
     
     return recon_loss + freq_weight * freq_loss + sparsity_weight * sparsity_loss

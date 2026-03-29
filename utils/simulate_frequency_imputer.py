@@ -401,6 +401,129 @@ def save_full_series_outputs(
     return data_path, plot_path
 
 
+def save_readable_full_series_figure(
+    output_dir: Path,
+    csv_path: Path,
+    feature_index: int,
+    series: np.ndarray,
+    mask: np.ndarray,
+    module_output: np.ndarray,
+    run_label: str,
+    dpi: int,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plot_path = (
+        output_dir
+        / f"{csv_path.stem}_feature{feature_index:02d}_full_series_readable_{run_label}.png"
+    )
+
+    steps = np.arange(len(series))
+    observed_mask = ~mask
+
+    fig, axes = plt.subplots(
+        6,
+        1,
+        figsize=(16, 13),
+        gridspec_kw={"height_ratios": [1.6, 0.22, 1.8, 1.0, 1.0, 1.0]},
+    )
+
+    axes[0].scatter(
+        steps[observed_mask],
+        series[observed_mask],
+        color="#111111",
+        s=8,
+        alpha=0.85,
+        label="Observed input samples",
+        zorder=3,
+    )
+    axes[0].set_title(
+        "Observed input samples (missing samples are zero-filled before FrequencyImputer)"
+    )
+    axes[0].set_ylabel("Feature value")
+    axes[0].grid(alpha=0.3)
+    axes[0].legend(loc="upper right")
+
+    axes[1].imshow(
+        mask[np.newaxis, :].astype(int),
+        aspect="auto",
+        cmap="coolwarm",
+        interpolation="nearest",
+    )
+    axes[1].set_title("Missing mask overview (blue=observed, red=missing)")
+    axes[1].set_yticks([])
+    axes[1].set_ylabel("")
+
+    axes[2].plot(
+        steps,
+        module_output,
+        color="#ff7f0e",
+        linewidth=1.2,
+        label="Module output",
+    )
+    axes[2].scatter(
+        steps[observed_mask],
+        series[observed_mask],
+        color="#111111",
+        s=7,
+        alpha=0.7,
+        label="Observed input samples",
+        zorder=3,
+    )
+    axes[2].set_title("Full-series FrequencyImputer output")
+    axes[2].set_ylabel("Feature value")
+    axes[2].grid(alpha=0.3)
+    axes[2].legend(loc="upper right")
+
+    zoom_span = min(180, len(series))
+    zoom_starts = [
+        0,
+        max(0, len(series) // 2 - zoom_span // 2),
+        max(0, len(series) - zoom_span),
+    ]
+    zoom_titles = ["Zoom: start", "Zoom: middle", "Zoom: end"]
+
+    for axis, start, title in zip(axes[3:], zoom_starts, zoom_titles):
+        end = min(len(series), start + zoom_span)
+        zoom_steps = steps[start:end]
+        zoom_series = series[start:end]
+        zoom_mask = mask[start:end]
+        zoom_output = module_output[start:end]
+        zoom_observed = ~zoom_mask
+
+        axis.plot(
+            zoom_steps,
+            zoom_output,
+            color="#ff7f0e",
+            linewidth=1.5,
+            label="Module output",
+        )
+        axis.scatter(
+            zoom_steps[zoom_observed],
+            zoom_series[zoom_observed],
+            color="#111111",
+            s=16,
+            alpha=0.9,
+            label="Observed input samples",
+            zorder=3,
+        )
+        axis.set_title(f"{title} ({start} to {end - 1})")
+        axis.set_ylabel("Value")
+        axis.grid(alpha=0.3)
+        axis.legend(loc="upper right")
+
+    axes[5].set_xlabel("Sample index")
+
+    fig.suptitle(
+        f"{csv_path.name} | feature {feature_index} | readable full-series view | {run_label}",
+        fontsize=14,
+    )
+    fig.tight_layout(rect=[0, 0.01, 1, 0.98])
+    fig.savefig(plot_path, dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+
+    return plot_path
+
+
 def main() -> None:
     args = parse_args()
     configure_plot_style()
@@ -446,6 +569,16 @@ def main() -> None:
         run_label=run_label,
         dpi=args.dpi,
     )
+    readable_full_plot_path = save_readable_full_series_figure(
+        output_dir=output_dir,
+        csv_path=csv_path,
+        feature_index=args.feature_index,
+        series=series.to_numpy(dtype=np.float32),
+        mask=full_mask,
+        module_output=full_output,
+        run_label=run_label,
+        dpi=args.dpi,
+    )
 
     print(f"CSV input        : {csv_path}")
     print(f"Feature index    : {args.feature_index}")
@@ -457,6 +590,7 @@ def main() -> None:
     print(f"Saved window fig : {plot_path}")
     print(f"Saved full data  : {full_data_path}")
     print(f"Saved full fig   : {full_plot_path}")
+    print(f"Saved clean fig  : {readable_full_plot_path}")
 
 
 if __name__ == "__main__":
