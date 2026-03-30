@@ -17,8 +17,6 @@ from torch.utils.data import DataLoader, TensorDataset
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-EPS = 1e-6
-
 
 def seed_everything(seed=40):
     random.seed(seed)
@@ -35,8 +33,6 @@ class DatasetBuilder:
     def __init__(self, seq_len=60, stride=1):
         self.seq_len = seq_len
         self.stride = stride
-        self.feature_mean = None
-        self.feature_std = None
         self.num_features = None
 
     def load_dir(self, dir_path, file_pattern="*.csv"):
@@ -62,26 +58,6 @@ class DatasetBuilder:
         self.num_features = data.shape[1]
         mask = np.concatenate(masks, axis=0)
         return data, mask
-
-    def fit_scaler(self, data):
-        """Fit a NaN-aware standardizer on observed training values only."""
-        feature_mean = np.nanmean(data, axis=0)
-        feature_std = np.nanstd(data, axis=0)
-
-        feature_mean[~np.isfinite(feature_mean)] = 0.0
-        feature_std[~np.isfinite(feature_std) | (feature_std < EPS)] = 1.0
-
-        self.feature_mean = feature_mean.astype(np.float32)
-        self.feature_std = feature_std.astype(np.float32)
-
-    def transform(self, data):
-        """Scale observed values and map missing positions to zero after scaling."""
-        if self.feature_mean is None or self.feature_std is None:
-            raise RuntimeError("fit_scaler must be called before transform.")
-
-        scaled = (data - self.feature_mean) / self.feature_std
-        scaled[np.isnan(data)] = 0.0
-        return scaled.astype(np.float32)
 
     def create_windows(self, data, mask):
         X, M = [], []
@@ -273,11 +249,10 @@ class FrequencyImputer(nn.Module):
     FIXED: Implements proper attention mechanism over frequency features.
     Attention weights are computed and applied to the magnitude spectrum.
     """
-    def __init__(self, seq_len, num_nodes=18):
+    def __init__(self, seq_len):
         super().__init__()
         self.freq_len = seq_len // 2 + 1
-        self.num_nodes = num_nodes
-        
+
         # Attention network: learns which frequencies are important
         self.attention = nn.Sequential(
             nn.Linear(self.freq_len * 2, 128),
@@ -296,14 +271,10 @@ class FrequencyImputer(nn.Module):
     def forward(self, x):
         # x: (B, S, N) -> permute to (B, N, S) for FFT
         x_perm = x.permute(0, 2, 1)  # (B, N, S)
-        
+
         # FFT to frequency domain
         xf = torch.fft.rfft(x_perm, dim=2)  # (B, N, F) complex
-        
-        # Extract magnitude and phase
-        magnitude = torch.abs(xf)  # (B, N, F)
-        phase = torch.angle(xf)  # (B, N, F)
-        
+
         # Concatenate real and imaginary for feature extraction
         real, imag = xf.real, xf.imag
         feat = torch.cat([real, imag], dim=-1)  # (B, N, 2F)
@@ -336,7 +307,7 @@ class GatedFusion(nn.Module):
     """
     FIXED: Uses temporal convolution for gate computation to capture temporal context.
     """
-    def __init__(self, num_nodes, seq_len):
+    def __init__(self, num_nodes):
         super().__init__()
         # Use 1D conv to capture temporal patterns in gate computation
         self.gate_net = nn.Sequential(
@@ -379,11 +350,11 @@ class AGF_ADNet(nn.Module):
         self.time_norm = nn.LayerNorm(num_nodes)
         
         # Freq Branch
-        self.freq = FrequencyImputer(seq_len, num_nodes)
+        self.freq = FrequencyImputer(seq_len)
         self.freq_norm = nn.LayerNorm(num_nodes)
-        
+
         # Fusion - keeping gated fusion as it's more advanced than Conv1x1
-        self.fusion = GatedFusion(num_nodes, seq_len)
+        self.fusion = GatedFusion(num_nodes)
 
         # Transformer with better input projection
         # Project each node's time series to d_model dimension
@@ -482,82 +453,6 @@ def apply_missing_mask(x, missing_mask):
     return x.masked_fill(missing_mask.bool(), 0.0)
 
 
-def build_type_index(seq_len, batch_size, sampling_rate, device):
-    return torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1) % sampling_rate
-
-
-def build_denoising_masks(x, missing_mask, point_mask_ratio=0.12, block_mask_prob=0.6, max_block_len=8):
-    """Hide observed values with point-wise and short temporal blocks."""
-    observed = ~missing_mask.bool()
-    point_drop = (torch.rand_like(x) < point_mask_ratio) & observed
-    block_drop = torch.zeros_like(point_drop)
-
-    batch_size, seq_len, num_features = x.shape
-    num_block_features = max(1, num_features // 4)
-
-    for b in range(batch_size):
-        if torch.rand((), device=x.device) > block_mask_prob:
-            continue
-
-        block_len = int(torch.randint(2, max_block_len + 1, (1,), device=x.device).item())
-        start_max = max(seq_len - block_len + 1, 1)
-        start = int(torch.randint(0, start_max, (1,), device=x.device).item())
-        feature_ids = torch.randperm(num_features, device=x.device)[:num_block_features]
-        block_drop[b, start : start + block_len, feature_ids] = observed[b, start : start + block_len, feature_ids]
-
-    target_mask = point_drop | block_drop
-    if not target_mask.any():
-        target_mask = observed
-
-    input_mask = missing_mask.clone()
-    input_mask[target_mask] = 1.0
-    return input_mask, target_mask.float()
-
-
-def create_pseudo_anomalies(windows, masks, seed=40):
-    """Corrupt normal windows to build a validation-time anomaly proxy."""
-    rng = np.random.default_rng(seed)
-    pseudo = windows.copy()
-    num_samples, seq_len, _ = pseudo.shape
-
-    for i in range(num_samples):
-        observed = masks[i] < 0.5
-        valid_features = np.flatnonzero(observed.any(axis=0))
-        if len(valid_features) == 0:
-            continue
-
-        num_selected = min(len(valid_features), max(1, len(valid_features) // 4))
-        feature_ids = rng.choice(valid_features, size=num_selected, replace=False)
-        op = int(rng.integers(0, 4))
-        window = pseudo[i]
-
-        if op == 0:
-            # Late spikes emulate abrupt faults.
-            start = int(rng.integers(seq_len // 2, seq_len))
-            amplitude = rng.uniform(2.5, 4.0)
-            sign = rng.choice([-1.0, 1.0], size=num_selected)
-            window[start:, feature_ids] = window[start:, feature_ids] + amplitude * sign.reshape(1, -1)
-        elif op == 1:
-            # Ramps emulate slowly developing drifts.
-            start = int(rng.integers(seq_len // 3, seq_len - 1))
-            drift = np.linspace(0.0, rng.uniform(1.5, 3.0), seq_len - start, dtype=np.float32)[:, None]
-            window[start:, feature_ids] = window[start:, feature_ids] + drift
-        elif op == 2:
-            # Gain changes emulate sensor scaling faults.
-            gain = rng.uniform(1.4, 2.2)
-            window[:, feature_ids] = window[:, feature_ids] * gain
-        else:
-            # Reverse a late segment to break temporal consistency.
-            start = int(rng.integers(seq_len // 3, seq_len - 3))
-            end = int(rng.integers(start + 2, seq_len))
-            window[start:end, feature_ids] = window[start:end, feature_ids][::-1]
-
-        window[~observed] = windows[i, ~observed]
-        pseudo[i] = window
-
-    return pseudo.astype(np.float32)
-
-
 def anomaly_scores(model, windows, masks, device, batch_size=32):
     scores = []
     loader = DataLoader(
@@ -580,36 +475,6 @@ def anomaly_scores(model, windows, masks, device, batch_size=32):
             scores.extend((sq_err / obs_cnt).cpu().numpy())
 
     return np.array(scores)
-
-
-def evaluate_proxy_detection(model, clean_windows, pseudo_windows, masks, device, batch_size=32):
-    clean_scores = anomaly_scores(model, clean_windows, masks, device=device, batch_size=batch_size)
-    pseudo_scores = anomaly_scores(model, pseudo_windows, masks, device=device, batch_size=batch_size)
-
-    threshold = float(np.mean(clean_scores) + np.std(clean_scores))
-    y_true = np.concatenate([
-        np.zeros(len(clean_scores), dtype=int),
-        np.ones(len(pseudo_scores), dtype=int),
-    ])
-    y_pred = np.concatenate([
-        (clean_scores > threshold).astype(int),
-        (pseudo_scores > threshold).astype(int),
-    ])
-
-    acc = accuracy_score(y_true, y_pred)
-    rec = recall_score(y_true, y_pred, zero_division=0)
-    f1 = f1_score(y_true, y_pred, zero_division=0)
-    separation = float((np.mean(pseudo_scores) - np.mean(clean_scores)) / (np.std(clean_scores) + EPS))
-    proxy_score = f1 + 0.1 * separation
-
-    return proxy_score, {
-        "acc": acc,
-        "rec": rec,
-        "f1": f1,
-        "threshold": threshold,
-        "clean_mean": float(np.mean(clean_scores)),
-        "pseudo_mean": float(np.mean(pseudo_scores)),
-    }
 
 
 def ewma_smooth(scores, alpha=0.05):
@@ -792,11 +657,6 @@ def train():
     if len(Xtr) == 0: 
         print("No training data available!")
         return
-
-    train_loader = DataLoader(
-        TensorDataset(torch.tensor(Xtr), torch.tensor(Mtr)), 
-        batch_size=BATCH_SIZE, shuffle=True
-    )
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
