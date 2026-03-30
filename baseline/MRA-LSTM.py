@@ -20,6 +20,10 @@ warnings.filterwarnings('ignore')
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
+
 class SequenceDataset(Dataset):
     """Dataset for multirate data.
 
@@ -37,13 +41,14 @@ class SequenceDataset(Dataset):
 
         values = data.astype(np.float32)
         n = len(values)
+        stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
 
         # Build windows with front-padding (mra.py style)
         self.x_windows = []
         self.y_windows = []
         self.labels = []
 
-        for i in range(0, n, stride):
+        for window_idx, i in enumerate(range(WINDOW_START_INDEX, stop_idx, stride)):
             # --- input window (length = sequence_length) ---
             if i < sequence_length:
                 pad_len = sequence_length - i - 1
@@ -70,11 +75,11 @@ class SequenceDataset(Dataset):
             self.x_windows.append(window)
             self.y_windows.append(target)
 
-            # Test data is defined as first half normal, latter half anomaly.
+            # Test data uses a fixed 2000/2000 split after the reserved warmup rows.
             if training:
                 self.labels.append(0)
             else:
-                self.labels.append(0 if i < n // 2 else 1)
+                self.labels.append(0 if window_idx < TEST_SPLIT_INDEX else 1)
 
     def __len__(self):
         return len(self.x_windows)
@@ -582,7 +587,7 @@ def evaluate_detection(errors, labels, threshold):
 
 def plot_anomaly_detection(errors, threshold, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """Plot anomaly detection results (reconstruction error + threshold) in mra.py style."""
-    split_idx = len(errors) // 2
+    split_idx = min(TEST_SPLIT_INDEX, len(errors))
     plt.figure(figsize=(6, 5))
     plt.plot(errors, label='测试异常分数', alpha=0.7)
     plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
@@ -623,7 +628,7 @@ def main():
     print(f"Using device: {device}")
 
     # Parameters
-    sequence_length = 30
+    sequence_length = 50
     prediction_horizon = 1
     batch_size = 32
     num_epochs = 10
@@ -672,9 +677,6 @@ def main():
     print("\nTraining model...")
     losses = train_model(model, train_loader, num_epochs, lr, device)
 
-    # Plot training loss
-    plot_training_loss(losses)
-
     # Compute anomaly scores on training data for threshold calculation
     print("\nComputing training anomaly scores for threshold...")
     train_errors = compute_anomaly_scores_train(model, train_loader, device)
@@ -687,7 +689,7 @@ def main():
     print("\nComputing test anomaly scores...")
     test_errors, labels, predictions, targets = compute_anomaly_scores(model, test_loader, device)
     print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
-    split_idx = len(test_errors) // 2
+    split_idx = min(TEST_SPLIT_INDEX, len(test_errors))
 
     # Evaluate detection using training-based threshold
     metrics = evaluate_detection(test_errors, labels, threshold_train)

@@ -15,6 +15,10 @@ import glob
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
+
 def plot_results(scores, threshold, split_idx, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """绘制异常检测可视化图（与 mra.py 完全一致）"""
     plt.figure(figsize=(6, 5))
@@ -52,10 +56,14 @@ def create_windows(data, seq_len=60, stride=1):
     """参考 mra.py 的滑窗方式，返回形状 (num_windows, seq_len, num_features)"""
     n = len(data)
     if n == 0:
-        return np.zeros((0, seq_len, data.shape[1]))
+        return np.zeros((0, seq_len, data.shape[1]), dtype=data.dtype)
+
+    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
+    if stop_idx <= WINDOW_START_INDEX:
+        return np.zeros((0, seq_len, data.shape[1]), dtype=data.dtype)
 
     windows = []
-    for i in range(0, n, stride):
+    for i in range(WINDOW_START_INDEX, stop_idx, stride):
         if i < seq_len:
             # 头部不足 seq_len 时，用首样本做前向填充
             pad_len = seq_len - i - 1
@@ -205,7 +213,7 @@ def train_model():
 
         recon_test = model(X_test_dev)
         test_scores = (recon_test - X_test_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()
-        split_idx = len(test_scores) // 2
+        split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
         y_true = np.zeros(len(test_scores), dtype=int)
         y_true[split_idx:] = 1
         y_pred = (test_scores > threshold).astype(int)

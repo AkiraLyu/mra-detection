@@ -13,6 +13,9 @@ plt.rcParams["font.sans-serif"] = ["SimHei"]
 
 
 EPS = 1e-8
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
 
 
 @dataclass
@@ -43,8 +46,12 @@ def create_windows(data: np.ndarray, seq_len: int = 60, stride: int = 1) -> np.n
     if n == 0:
         return np.zeros((0, seq_len, data.shape[1]), dtype=np.float64)
 
+    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
+    if stop_idx <= WINDOW_START_INDEX:
+        return np.zeros((0, seq_len, data.shape[1]), dtype=np.float64)
+
     windows = []
-    for i in range(99, n, stride):
+    for i in range(WINDOW_START_INDEX, stop_idx, stride):
         if i < seq_len:
             pad_len = seq_len - i - 1
             window_data = np.concatenate(
@@ -116,7 +123,8 @@ def infer_row_patterns(data: np.ndarray, groups: list[RateGroup]) -> tuple[np.nd
 
 def build_test_labels(num_samples: int) -> np.ndarray:
     labels = np.zeros(num_samples, dtype=int)
-    labels[num_samples // 2 :] = 1
+    split_idx = min(TEST_SPLIT_INDEX, num_samples)
+    labels[split_idx:] = 1
     return labels
 
 
@@ -432,7 +440,7 @@ def plot_results(
 
 
 def train_model() -> None:
-    seq_len = 60
+    seq_len = 50
     stride = 1
     latent_dim = 3
     alpha = 0.99
@@ -471,7 +479,7 @@ def train_model() -> None:
     test_scores = score_window_dataset(model, x_test, t2_limit, spe_limits)
     threshold = float(np.mean(train_scores))
 
-    split_idx = len(test_scores) // 2
+    split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
     y_true = build_test_labels(len(test_scores))
     y_pred = (test_scores > threshold).astype(int)
 

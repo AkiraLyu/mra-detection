@@ -14,6 +14,10 @@ from pathlib import Path
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
+
 # ==========================================
 # 1. 数据读取函数
 # ==========================================
@@ -46,7 +50,11 @@ def create_sequences(data, seq_length, stride=1):
     if n == 0:
         return np.zeros((0, seq_length, data.shape[1]), dtype=data.dtype)
 
-    for i in range(0, n, stride):
+    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
+    if stop_idx <= WINDOW_START_INDEX:
+        return np.zeros((0, seq_length, data.shape[1]), dtype=data.dtype)
+
+    for i in range(WINDOW_START_INDEX, stop_idx, stride):
         if i < seq_length:
             pad_len = seq_length - i - 1
             if pad_len > 0:
@@ -83,7 +91,7 @@ train_data_norm = scaler.fit_transform(train_data_raw)
 test_data_norm = scaler.transform(test_data_raw)
 
 # 创建时间序列窗口
-SEQ_LENGTH = 10
+SEQ_LENGTH = 50
 
 X_train = create_sequences(train_data_norm, SEQ_LENGTH, stride=1)
 X_test = create_sequences(test_data_norm, SEQ_LENGTH, stride=1)
@@ -189,7 +197,7 @@ with torch.no_grad():
         (test_predictions - test_tensor_eval) ** 2, dim=[1, 2]
     ).cpu().numpy()
 
-test_split_idx = len(test_loss_dist) // 2
+test_split_idx = min(TEST_SPLIT_INDEX, len(test_loss_dist))
 test_labels = np.zeros(len(test_loss_dist), dtype=int)
 test_labels[test_split_idx:] = 1
 

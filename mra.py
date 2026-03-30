@@ -17,6 +17,10 @@ from torch.utils.data import DataLoader, TensorDataset
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
+
 
 def seed_everything(seed=40):
     random.seed(seed)
@@ -68,7 +72,12 @@ class DatasetBuilder:
             shape = (0, self.seq_len, num_feat)
             return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
 
-        for i in range(99, n, self.stride):
+        stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * self.stride)
+        if stop_idx <= WINDOW_START_INDEX:
+            shape = (0, self.seq_len, num_feat)
+            return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
+
+        for i in range(WINDOW_START_INDEX, stop_idx, self.stride):
             if i < self.seq_len:
                 pad_len = self.seq_len - i - 1
                 window_data = np.concatenate([
@@ -583,7 +592,8 @@ def train_single_agf_model(
 
 def build_test_labels(num_scores):
     labels = np.zeros(num_scores, dtype=int)
-    labels[num_scores // 2 :] = 1
+    split_idx = min(TEST_SPLIT_INDEX, num_scores)
+    labels[split_idx:] = 1
     return labels
 
 
@@ -617,7 +627,7 @@ def plot_results(
 def train():
     seed_everything(40)
 
-    SEQ_LEN = 60
+    SEQ_LEN = 50
     DATA_DIR = "./data"
     MAX_EPOCHS = 3
     BATCH_SIZE = 32
@@ -711,7 +721,7 @@ def train():
     
     print("\nEvaluating on test set...")
     test_labels = build_test_labels(len(test_scores_arr))
-    test_split_idx = len(test_scores_arr) // 2
+    test_split_idx = min(TEST_SPLIT_INDEX, len(test_scores_arr))
 
     raw_pred = (test_scores_arr > raw_threshold).astype(int)
     raw_acc = accuracy_score(test_labels, raw_pred)

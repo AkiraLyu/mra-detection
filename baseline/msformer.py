@@ -15,6 +15,11 @@ from model.mstransformer import MSTransformer
 import random
 
 
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
+
+
 def seed_everything(seed=40):
     random.seed(seed)
     np.random.seed(seed)
@@ -57,7 +62,12 @@ def create_windows(data, mask, seq_len, stride=1):
         shape = (0, seq_len, data.shape[1])
         return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
 
-    for i in range(99, n, stride):
+    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
+    if stop_idx <= WINDOW_START_INDEX:
+        shape = (0, seq_len, data.shape[1])
+        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
+
+    for i in range(WINDOW_START_INDEX, stop_idx, stride):
         if i < seq_len:
             pad_len = seq_len - i - 1
             window_data = np.concatenate([
@@ -176,7 +186,8 @@ def score_dataset(model, windows, masks, device, sampling_rate, batch_size=32):
 
 def build_test_labels(num_scores):
     labels = np.zeros(num_scores, dtype=int)
-    labels[num_scores // 2 :] = 1
+    split_idx = min(TEST_SPLIT_INDEX, num_scores)
+    labels[split_idx:] = 1
     return labels
 
 
@@ -210,7 +221,7 @@ def run_full_detection():
     # --- B. 模型参数配置 ---
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     feature_dim = num_features
-    window_size = 60
+    window_size = 50
     s_rate = 6
     train_epochs = 10
     batch_size = 32
@@ -268,7 +279,7 @@ def run_full_detection():
     # --- F. 计算测试集异常分数 ---
     test_scores_arr = score_dataset(model, X_test, M_test, device=device, sampling_rate=s_rate, batch_size=batch_size)
     test_labels = build_test_labels(len(test_scores_arr))
-    split_idx = len(test_scores_arr) // 2
+    split_idx = min(TEST_SPLIT_INDEX, len(test_scores_arr))
 
     print(f"\nAnomaly Detection Results:")
     print(f"  Mean Score: {np.mean(test_scores_arr):.6f}")

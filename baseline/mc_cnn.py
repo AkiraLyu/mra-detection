@@ -40,6 +40,9 @@ from torch.utils.data import DataLoader, TensorDataset
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
 EPS = 1e-6
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
 
 
 def seed_everything(seed: int = 42) -> None:
@@ -124,7 +127,12 @@ def create_windows(
         shape = (0, seq_len, data.shape[1])
         return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
 
-    for i in range(0, n, stride):
+    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
+    if stop_idx <= WINDOW_START_INDEX:
+        shape = (0, seq_len, data.shape[1])
+        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
+
+    for i in range(WINDOW_START_INDEX, stop_idx, stride):
         if i < seq_len:
             pad_len = seq_len - i - 1
             window_data = np.concatenate(
@@ -180,7 +188,7 @@ class PreparedData:
 
 
 def prepare_data(
-    num_channels: int = 5,
+    num_channels: int = 50,
     stride: int = 1,
     batch_size: int = 128,
 ) -> PreparedData:
@@ -483,7 +491,8 @@ def score_dataset(model: MCCNN, data_loader: DataLoader, device: torch.device) -
 
 def build_test_labels(num_samples: int) -> np.ndarray:
     labels = np.zeros(num_samples, dtype=int)
-    labels[num_samples // 2 :] = 1
+    split_idx = min(TEST_SPLIT_INDEX, num_samples)
+    labels[split_idx:] = 1
     return labels
 
 
@@ -535,7 +544,7 @@ def train_model() -> None:
     test_scores = score_dataset(model, data.test_loader, device)
     threshold = float(np.mean(train_scores))
 
-    split_idx = len(test_scores) // 2
+    split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
     y_true = build_test_labels(len(test_scores))
     y_pred = (test_scores > threshold).astype(int)
 

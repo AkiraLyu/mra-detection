@@ -22,6 +22,11 @@ import matplotlib.pyplot as plt
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
 
+WINDOW_START_INDEX = 49
+WINDOW_SAMPLE_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
+
+
 def seed_everything(seed=40):
     random.seed(seed)
     np.random.seed(seed)
@@ -67,8 +72,12 @@ def create_windows(data, seq_len=60, stride=1):
     if n == 0:
         return np.zeros((0, seq_len, data.shape[1]), dtype=data.dtype)
 
+    stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * stride)
+    if stop_idx <= WINDOW_START_INDEX:
+        return np.zeros((0, seq_len, data.shape[1]), dtype=data.dtype)
+
     windows = []
-    for i in range(0, n, stride):
+    for i in range(WINDOW_START_INDEX, stop_idx, stride):
         if i < seq_len:
             pad_len = seq_len - i - 1
             window_data = np.concatenate(
@@ -213,7 +222,7 @@ def train_model():
 
         recon_test = model(x_test_dev)
         test_scores = (recon_test - x_test_dev).pow(2).mean(dim=[1, 2]).cpu().numpy()
-        split_idx = len(test_scores) // 2
+        split_idx = min(TEST_SPLIT_INDEX, len(test_scores))
         y_true = np.zeros(len(test_scores), dtype=int)
         y_true[split_idx:] = 1
         y_pred = (test_scores > threshold).astype(int)
