@@ -1,775 +1,1275 @@
-import copy
-import os
-import random
+#!/usr/bin/env python3
+from __future__ import annotations
 
-os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+import argparse
+import json
+import math
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader, TensorDataset
 
-plt.rcParams['font.sans-serif'] = ['SimHei']
+from freq_reconstruction import FrequencyOnlyReconstructor
+from graph_gcn_reconstruction import (
+    GraphGCNReconstructor,
+    ObservedStandardScaler,
+    adjacency_balance_loss,
+    build_windows,
+    configure_chinese_font,
+    load_csv_series,
+    save_adjacency_heatmap,
+    seed_everything,
+    summarize_adjacency,
+)
 
-WINDOW_START_INDEX = 49
-WINDOW_SAMPLE_COUNT = 4000
+
+TEST_SEGMENT_LENGTH = 2050
+TEST_WINDOW_COUNT = 2000
 TEST_SPLIT_INDEX = 2000
 
 
-def seed_everything(seed=40):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-# ==========================================
-# 1. Dataset Builder (loads from data/ directory)
-# ==========================================
-class DatasetBuilder:
-    def __init__(self, seq_len=60, stride=1):
-        self.seq_len = seq_len
-        self.stride = stride
-        self.num_features = None
-
-    def load_dir(self, dir_path, file_pattern="*.csv"):
-        """Load CSV files matching file_pattern from a directory and concatenate.
-        CSVs are headerless with numeric columns.
-        Returns (data, mask) where mask uses 1 for missing and 0 for observed.
-        """
-        import glob
-        csv_files = sorted(glob.glob(os.path.join(dir_path, file_pattern)))
-        if not csv_files:
-            raise FileNotFoundError(f"No CSV files matching '{file_pattern}' in {dir_path}")
-
-        dfs = []
-        masks = []
-        for f in csv_files:
-            df = pd.read_csv(f, header=None)
-            arr = df.to_numpy(dtype=np.float32)
-            dfs.append(arr)
-            masks.append(np.isnan(arr).astype(np.float32))
-            print(f"  Loaded {f}: {len(df)} rows, {df.shape[1]} cols")
-
-        data = np.concatenate(dfs, axis=0)
-        self.num_features = data.shape[1]
-        mask = np.concatenate(masks, axis=0)
-        return data, mask
-
-    def create_windows(self, data, mask):
-        X, M = [], []
-        n = len(data)
-        num_feat = data.shape[1]
-
-        if n == 0:
-            shape = (0, self.seq_len, num_feat)
-            return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
-
-        stop_idx = min(n, WINDOW_START_INDEX + WINDOW_SAMPLE_COUNT * self.stride)
-        if stop_idx <= WINDOW_START_INDEX:
-            shape = (0, self.seq_len, num_feat)
-            return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
-
-        for i in range(WINDOW_START_INDEX, stop_idx, self.stride):
-            if i < self.seq_len:
-                pad_len = self.seq_len - i - 1
-                window_data = np.concatenate([
-                    np.tile(data[0:1], (pad_len, 1)),
-                    data[0 : i + 1]
-                ], axis=0)
-                window_mask = np.concatenate([
-                    np.tile(mask[0:1], (pad_len, 1)),
-                    mask[0 : i + 1]
-                ], axis=0)
-            else:
-                window_data = data[i - self.seq_len + 1 : i + 1]
-                window_mask = mask[i - self.seq_len + 1 : i + 1]
-
-            X.append(window_data)
-            M.append(window_mask)
-
-        return np.stack(X).astype(np.float32), np.stack(M).astype(np.float32)
+@dataclass
+class LossWeights:
+    fusion: float = 1.0
+    gcn: float = 0.4
+    freq: float = 0.4
+    detector: float = 0.5
+    graph: float = 0.1
 
 
-# ==========================================
-# 2. Adaptive Graph Learner
-# ==========================================
-class GraphLearner(nn.Module):
-    def __init__(self, num_nodes, hidden_dim=32, static_dim=8, coord_dim=8, self_loop_weight=1.0, base_adj=None):
-        super().__init__()
-        self.num_nodes = num_nodes
-        self.self_loop_weight = self_loop_weight
-
-        if base_adj is None:
-            self.register_buffer("base_adj", None)
-        else:
-            self.register_buffer("base_adj", base_adj.float())
-
-        # Static node descriptors stand in for POI-like metadata.
-        self.static_context = nn.Parameter(torch.randn(num_nodes, static_dim))
-        # Learned node coordinates define a reusable inverse-distance prior.
-        self.node_coords = nn.Parameter(torch.randn(num_nodes, coord_dim))
-
-        dynamic_dim = 4  # mean, std, last observed value, missing ratio
-        self.node_encoder = nn.Sequential(
-            nn.Linear(dynamic_dim + static_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-        )
-        self.edge_mlp = nn.Sequential(
-            nn.Linear(hidden_dim * 4, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def _build_prior_adjacency(self, device, dtype):
-        eye = torch.eye(self.num_nodes, device=device, dtype=dtype)
-        if self.base_adj is not None:
-            prior = self.base_adj.to(device=device, dtype=dtype).clamp_min(0.0)
-            prior = prior * (1.0 - eye)
-            return prior
-
-        dist = torch.cdist(self.node_coords, self.node_coords, p=2)
-        prior = 1.0 / (1.0 + dist)
-        prior = prior * (1.0 - eye)
-        return prior
-
-    def _last_observed(self, x, observed):
-        # Pick the most recent observed value per node; fall back to the first step if all missing.
-        time_index = torch.arange(x.size(1), device=x.device, dtype=x.dtype).view(1, -1, 1)
-        latest_index = (time_index * observed).argmax(dim=1).long()  # (B, N)
-        return x.gather(1, latest_index.unsqueeze(1)).squeeze(1)
-
-    def _dynamic_context(self, x, mask):
-        observed = 1.0 - mask
-        count = observed.sum(dim=1).clamp_min(1.0)
-        mean = (x * observed).sum(dim=1) / count
-
-        centered = (x - mean.unsqueeze(1)) * observed
-        std = torch.sqrt(centered.pow(2).sum(dim=1) / count + 1e-6)
-        last = self._last_observed(x, observed)
-        missing_ratio = mask.mean(dim=1)
-        return torch.stack([mean, std, last, missing_ratio], dim=-1)
-
-    def forward(self, x, mask=None):
-        if mask is None:
-            mask = torch.zeros_like(x)
-
-        batch_size = x.size(0)
-        node_dynamic = self._dynamic_context(x, mask)
-        node_static = self.static_context.unsqueeze(0).expand(batch_size, -1, -1)
-        node_features = torch.cat([node_dynamic, node_static], dim=-1)
-        node_repr = self.node_encoder(node_features)  # (B, N, H)
-
-        h_i = node_repr.unsqueeze(2).expand(-1, -1, self.num_nodes, -1)
-        h_j = node_repr.unsqueeze(1).expand(-1, self.num_nodes, -1, -1)
-        pair_features = torch.cat([h_i, h_j, torch.abs(h_i - h_j), h_i * h_j], dim=-1)
-
-        edge_modifier = F.relu(self.edge_mlp(pair_features).squeeze(-1))  # (B, N, N)
-        prior = self._build_prior_adjacency(x.device, x.dtype).unsqueeze(0)
-        adapt_adj = edge_modifier * prior
-
-        eye = torch.eye(self.num_nodes, device=x.device, dtype=x.dtype).unsqueeze(0)
-        adapt_adj = adapt_adj + eye * self.self_loop_weight
-
-        degree = adapt_adj.sum(dim=-1).clamp_min(1e-6)
-        inv_sqrt_degree = degree.pow(-0.5)
-        norm_adj = inv_sqrt_degree.unsqueeze(-1) * adapt_adj * inv_sqrt_degree.unsqueeze(-2)
-        return norm_adj
-
-# ==========================================
-# 3. GCN Layer
-# ==========================================
-class GCNLayer(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.linear = nn.Linear(in_dim, out_dim)
-
-    def forward(self, x, adj):
-        # x: (B, S, N, F)
-        x = self.linear(x)
-        if adj.dim() == 2:
-            out = torch.einsum("nm,bsmd->bsnd", adj, x)
-        else:
-            out = torch.einsum("bnm,bsmd->bsnd", adj, x)
-        return out
-
-# ==========================================
-# 4. FIXED: Multi-Scale TCN with Proper Causal Padding
-# ==========================================
-class MultiScaleTCN(nn.Module):
-    """
-    FIXED: Uses proper causal padding (left-side only) to prevent seeing future.
-    For reconstruction tasks, you may want bidirectional; this implements causal version.
-    """
-    def __init__(self, num_nodes, kernel_sizes=[3, 5, 7], causal=True):
-        super().__init__()
-        self.causal = causal
-        self.convs = nn.ModuleList()
-        self.kernel_sizes = kernel_sizes
-        
-        for k in kernel_sizes:
-            # No padding in conv, we'll handle it manually for causal
-            self.convs.append(
-                nn.Conv1d(
-                    num_nodes, num_nodes, 
-                    kernel_size=k, 
-                    padding=0,  # Manual padding
-                    groups=num_nodes
-                )
-            )
-        
-        # Fusion of multi-scale outputs
-        self.fusion = nn.Linear(len(kernel_sizes), 1)
-
-    def forward(self, x):
-        # x: (B, N, S)
-        outputs = []
-        for conv, k in zip(self.convs, self.kernel_sizes):
-            if self.causal:
-                # Left-side padding only (causal)
-                padded = F.pad(x, (k-1, 0))
-            else:
-                # Symmetric padding (non-causal, for reconstruction)
-                padded = F.pad(x, ((k-1)//2, k//2))
-            
-            out = conv(padded)
-            outputs.append(out)  # (B, N, S)
-        
-        # Stack: (B, N, S, K)
-        out_stack = torch.stack(outputs, dim=-1)
-        # Weighted sum of scales: (B, N, S)
-        out = self.fusion(out_stack).squeeze(-1)
-        return out
-
-# ==========================================
-# 5. FIXED: Frequency Imputer with Proper Attention
-# ==========================================
-class FrequencyImputer(nn.Module):
-    """
-    FIXED: Implements proper attention mechanism over frequency features.
-    Attention weights are computed and applied to the magnitude spectrum.
-    """
-    def __init__(self, seq_len):
-        super().__init__()
-        self.freq_len = seq_len // 2 + 1
-
-        # Attention network: learns which frequencies are important
-        self.attention = nn.Sequential(
-            nn.Linear(self.freq_len * 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, self.freq_len),
-            nn.Sigmoid(),  # Attention weights in [0, 1]
-        )
-        
-        # Frequency enhancement network
-        self.freq_enhance = nn.Sequential(
-            nn.Linear(self.freq_len * 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, self.freq_len * 2),
-        )
-
-    def forward(self, x):
-        # x: (B, S, N) -> permute to (B, N, S) for FFT
-        x_perm = x.permute(0, 2, 1)  # (B, N, S)
-
-        # FFT to frequency domain
-        xf = torch.fft.rfft(x_perm, dim=2)  # (B, N, F) complex
-
-        # Concatenate real and imaginary for feature extraction
-        real, imag = xf.real, xf.imag
-        feat = torch.cat([real, imag], dim=-1)  # (B, N, 2F)
-        
-        # Compute attention weights per node
-        att_weights = self.attention(feat)  # (B, N, F)
-        
-        # Enhance frequency features
-        feat_enhanced = self.freq_enhance(feat)  # (B, N, 2F)
-        real_enh = feat_enhanced[..., :self.freq_len]
-        imag_enh = feat_enhanced[..., self.freq_len:]
-        
-        # Apply attention to enhanced features
-        real_attended = real_enh * att_weights
-        imag_attended = imag_enh * att_weights
-        
-        # Residual spectrum refinement is more stable than replacing the FFT outright.
-        xf_enhanced = xf + torch.complex(real_attended, imag_attended)
-        
-        # IFFT back to time domain
-        x_rec = torch.fft.irfft(xf_enhanced, n=x.size(1), dim=2)  # (B, N, S)
-        
-        # Permute back to (B, S, N)
-        return x_rec.permute(0, 2, 1)
-
-# ==========================================
-# 6. FIXED: Gated Fusion with Temporal Context
-# ==========================================
-class GatedFusion(nn.Module):
-    """
-    FIXED: Uses temporal convolution for gate computation to capture temporal context.
-    """
-    def __init__(self, num_nodes):
-        super().__init__()
-        # Use 1D conv to capture temporal patterns in gate computation
-        self.gate_net = nn.Sequential(
-            nn.Conv1d(num_nodes * 2, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv1d(64, num_nodes, kernel_size=1),
-            nn.Sigmoid()
-        )
-        self.norm = nn.LayerNorm(num_nodes)
-
-    def forward(self, h_time, h_freq):
-        # h_time, h_freq: (B, S, N)
-        # Permute to (B, N, S) for conv1d
-        h_time_perm = h_time.permute(0, 2, 1)
-        h_freq_perm = h_freq.permute(0, 2, 1)
-        
-        combined = torch.cat([h_time_perm, h_freq_perm], dim=1)  # (B, 2N, S)
-        z = self.gate_net(combined)  # (B, N, S)
-        z = z.permute(0, 2, 1)  # (B, S, N)
-        
-        # Gated combination
-        h = z * h_time + (1 - z) * h_freq
-        return self.norm(h)
-
-# ==========================================
-# 7. AGF-ADNet (Fixed Integration)
-# ==========================================
-class AGF_ADNet(nn.Module):
-    def __init__(self, num_nodes=18, seq_len=60, d_model=64, sampling_rate=6):
-        super().__init__()
-        self.num_nodes = num_nodes
-        self.seq_len = seq_len
-        self.sampling_rate = sampling_rate
-        
-        self.graph = GraphLearner(num_nodes)
-        
-        # Time Branch
-        self.gcn = GCNLayer(1, 1)
-        self.tcn = MultiScaleTCN(num_nodes, kernel_sizes=[3, 5, 9], causal=False)  # Non-causal for reconstruction
-        self.time_norm = nn.LayerNorm(num_nodes)
-        
-        # Freq Branch
-        self.freq = FrequencyImputer(seq_len)
-        self.freq_norm = nn.LayerNorm(num_nodes)
-
-        # Fusion - keeping gated fusion as it's more advanced than Conv1x1
-        self.fusion = GatedFusion(num_nodes)
-
-        # Transformer with better input projection
-        # Project each node's time series to d_model dimension
-        self.input_proj = nn.Linear(num_nodes, d_model)
-        self.pos_enc = nn.Parameter(torch.randn(1, seq_len, d_model))
-        self.sampling_rate_embedding = nn.Embedding(sampling_rate, d_model)
-        
-        encoder = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=4, 
-            dim_feedforward=128, 
-            batch_first=True,
-            dropout=0.1
-        )
-        self.transformer = nn.TransformerEncoder(encoder, num_layers=2)
-        self.output_proj = nn.Linear(d_model, num_nodes)
-
-    def _build_sampling_type_index(self, seq_len, batch_size, device):
-        return torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1) % self.sampling_rate
-
-    def forward(self, x, mask):
-        # mask: 1 for missing, 0 for observed
-        # x: (B, S, N)
-        adj = self.graph(x, mask)
-
-        # 1. Time Branch
-        x_gcn = self.gcn(x.unsqueeze(-1), adj).squeeze(-1)  # (B, S, N)
-        x_gcn = self.time_norm(x_gcn)
-        
-        x_tcn = self.tcn(x.permute(0, 2, 1)).permute(0, 2, 1)  # (B, S, N)
-        h_time = x_gcn + x_tcn
-
-        # 2. Freq Branch
-        h_freq = self.freq(x)  # (B, S, N)
-        h_freq = self.freq_norm(h_freq)
-
-        # 3. Gated Fusion
-        x_imp = self.fusion(h_time, h_freq)  # (B, S, N)
-
-        # 4. Imputation: Fill missing with imputed values
-        observed_mask = 1.0 - mask
-        x_filled = x * observed_mask + x_imp * mask
-
-        # 5. Transformer Reconstruction
-        # Reuse the repository's sampling-rate encoding idea:
-        # type index -> embedding -> add to the transformer tokens.
-        seq_len = x_filled.size(1)
-        if seq_len > self.pos_enc.size(1):
-            raise ValueError(f"Input sequence length {seq_len} exceeds configured seq_len {self.pos_enc.size(1)}")
-        pos_enc = self.pos_enc[:, :seq_len]
-        sampling_types = self._build_sampling_type_index(seq_len, x_filled.size(0), x_filled.device)
-        sampling_rate_encoding = self.sampling_rate_embedding(sampling_types)
-
-        z = self.input_proj(x_filled) + pos_enc + sampling_rate_encoding  # (B, S, d_model)
-        z = self.transformer(z)
-        x_rec = self.output_proj(z)  # (B, S, N)
-
-        return x_rec, adj, x_imp
-
-# ==========================================
-# 8. FIXED: Dual-Domain Loss
-# ==========================================
-def dual_domain_loss(x_rec, x_true, missing_mask, target_mask, adj, freq_weight=0.1, sparsity_weight=0.1):
-    """
-    missing_mask: 1 for missing, 0 for observed
-    target_mask: 1 where reconstruction error should be supervised
-    """
-    target_mask = target_mask.float()
-    recon_loss = ((x_rec - x_true) * target_mask).pow(2).sum() / target_mask.sum().clamp_min(1.0)
-    
-    observed_ratio = (1.0 - missing_mask).mean(dim=[1, 2])
-    valid_samples = observed_ratio > 0.5
-
-    # Apply a masked target so the FFT branch is supervised only where ground truth is valid.
-    freq_target = x_rec.detach() * (1.0 - target_mask) + x_true * target_mask
-
-    if valid_samples.sum() > 0:
-        x_rec_valid = x_rec[valid_samples].permute(0, 2, 1)  # (B', N, S)
-        x_true_valid = freq_target[valid_samples].permute(0, 2, 1)
-        
-        fft_rec = torch.fft.rfft(x_rec_valid, dim=2)
-        fft_true = torch.fft.rfft(x_true_valid, dim=2)
-        
-        # Compare magnitude spectra
-        freq_loss = (fft_rec.abs() - fft_true.abs()).pow(2).mean()
-    else:
-        freq_loss = torch.tensor(0.0, device=x_rec.device)
-    
-    # Encourage concentrated connectivity without hard thresholding.
-    sparsity_loss = -(adj * torch.log(adj + 1e-8)).sum(dim=-1).mean()
-    
-    return recon_loss + freq_weight * freq_loss + sparsity_weight * sparsity_loss
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="GCN + 频域双专家门控插补，并将补全结果送入 Transformer 做无监督异常检测。"
+    )
+    parser.add_argument("--train-glob", default="data/train/train_1.csv")
+    parser.add_argument("--test-glob", default="data/test/test_C5_1.csv")
+    parser.add_argument(
+        "--output-dir",
+        default="outputs/gcn_freq_fusion_transformer_detection",
+    )
+    parser.add_argument("--seq-len", type=int, default=50)
+    parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--epochs", type=int, default=12)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--holdout-ratio",
+        type=float,
+        default=0.15,
+        help="训练时从观测点额外随机遮挡的比例。",
+    )
+    parser.add_argument("--graph-hidden-dim", type=int, default=32)
+    parser.add_argument("--gcn-hidden-dim", type=int, default=32)
+    parser.add_argument("--gate-hidden-dim", type=int, default=64)
+    parser.add_argument("--rate-embed-dim", type=int, default=8)
+    parser.add_argument("--detector-d-model", type=int, default=128)
+    parser.add_argument("--detector-heads", type=int, default=4)
+    parser.add_argument("--detector-layers", type=int, default=3)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--diag-target", type=float, default=0.25)
+    parser.add_argument(
+        "--score-disagreement-weight",
+        type=float,
+        default=0.25,
+        help="将专家分歧并入最终异常分数时的权重。",
+    )
+    parser.add_argument(
+        "--score-shift-weight",
+        type=float,
+        default=1.0,
+        help="将补全窗口的分布偏移分数并入最终异常分数时的权重。",
+    )
+    parser.add_argument(
+        "--threshold-std-factor",
+        type=float,
+        default=2.0,
+        help="阈值 = max(mean + k * std, quantile)。",
+    )
+    parser.add_argument(
+        "--threshold-quantile",
+        type=float,
+        default=0.95,
+        help="基于训练分数的分位数阈值。",
+    )
+    parser.add_argument(
+        "--ewaf-alpha",
+        type=float,
+        default=0.3,
+        help="异常分数 EWAF 平滑系数，取值范围 (0, 1]。",
+    )
+    parser.add_argument(
+        "--min-anomaly-duration",
+        type=int,
+        default=50,
+        help="最短异常持续长度，单位为窗口点数；小于该长度的连续异常片段会被抑制。",
+    )
+    parser.add_argument("--seed", type=int, default=40)
+    parser.add_argument("--device", default=None)
+    return parser.parse_args()
 
 
-def apply_missing_mask(x, missing_mask):
-    return x.masked_fill(missing_mask.bool(), 0.0)
+def choose_device(device_arg: str | None) -> torch.device:
+    if device_arg is not None:
+        return torch.device(device_arg)
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def anomaly_scores(model, windows, masks, device, batch_size=32):
-    scores = []
-    loader = DataLoader(
-        TensorDataset(torch.tensor(windows), torch.tensor(masks)),
-        batch_size=batch_size
+def save_csv(data: np.ndarray, feature_names: list[str], output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(data, columns=feature_names).to_csv(output_path, index=False)
+
+
+def build_standard_windows(
+    data: np.ndarray,
+    mask: np.ndarray,
+    seq_len: int,
+    stride: int = 1,
+) -> tuple[np.ndarray, np.ndarray]:
+    if len(data) < seq_len:
+        shape = (0, seq_len, data.shape[1])
+        return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
+
+    windows = []
+    window_masks = []
+    for end_idx in range(seq_len, len(data) + 1, stride):
+        windows.append(data[end_idx - seq_len : end_idx])
+        window_masks.append(mask[end_idx - seq_len : end_idx])
+    return np.stack(windows).astype(np.float32), np.stack(window_masks).astype(
+        np.float32
     )
 
-    model.eval()
-    with torch.no_grad():
-        for x, missing_mask in loader:
-            x = x.to(device)
-            missing_mask = missing_mask.to(device)
 
-            observed_mask = 1.0 - missing_mask
-            x_input = apply_missing_mask(x, missing_mask)
-            xr, _, _ = model(x_input, missing_mask)
+def build_prompt_test_windows(
+    data: np.ndarray,
+    mask: np.ndarray,
+    seq_len: int,
+    stride: int = 1,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    windows = []
+    window_masks = []
+    labels = []
 
-            sq_err = ((xr - x) * observed_mask).pow(2).sum(dim=[1, 2])
-            obs_cnt = observed_mask.sum(dim=[1, 2]).clamp_min(1e-8)
-            scores.extend((sq_err / obs_cnt).cpu().numpy())
+    for segment_start, label in ((0, 0), (TEST_SEGMENT_LENGTH, 1)):
+        segment_data = data[segment_start : segment_start + TEST_SEGMENT_LENGTH]
+        segment_mask = mask[segment_start : segment_start + TEST_SEGMENT_LENGTH]
+        stop_idx = min(TEST_SEGMENT_LENGTH, seq_len + TEST_WINDOW_COUNT)
 
-    return np.array(scores)
+        for end_idx in range(seq_len, stop_idx, stride):
+            windows.append(segment_data[end_idx - seq_len : end_idx])
+            window_masks.append(segment_mask[end_idx - seq_len : end_idx])
+            labels.append(label)
 
-
-def ewma_smooth(scores, alpha=0.05):
-    smoothed = np.empty_like(scores, dtype=np.float32)
-    smoothed[0] = scores[0]
-    for idx in range(1, len(scores)):
-        smoothed[idx] = alpha * scores[idx] + (1.0 - alpha) * smoothed[idx - 1]
-    return smoothed
-
-
-def enforce_min_run(predictions, min_run=100):
-    filtered = np.zeros_like(predictions, dtype=int)
-    start = None
-
-    for idx, value in enumerate(predictions.astype(int)):
-        if value == 1 and start is None:
-            start = idx
-        if (value == 0 or idx == len(predictions) - 1) and start is not None:
-            end = idx if value == 0 else idx + 1
-            if end - start >= min_run:
-                filtered[start:end] = 1
-            start = None
-
-    return filtered
+    return (
+        np.stack(windows).astype(np.float32),
+        np.stack(window_masks).astype(np.float32),
+        np.asarray(labels, dtype=np.int64),
+    )
 
 
-def persistent_fault_detection(train_scores, test_scores, alpha=0.05, threshold_std=1.0, min_run=100):
-    train_smoothed = ewma_smooth(train_scores, alpha=alpha)
-    test_smoothed = ewma_smooth(test_scores, alpha=alpha)
-    threshold = float(np.mean(train_smoothed) + threshold_std * np.std(train_smoothed))
-    point_pred = (test_smoothed > threshold).astype(int)
-    persistent_pred = enforce_min_run(point_pred, min_run=min_run)
-    return train_smoothed, test_smoothed, threshold, point_pred, persistent_pred
+def infer_rate_metadata(missing_mask: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+    missing_ratio = missing_mask.mean(axis=0)
+    observed_ratio = np.clip(1.0 - missing_ratio, 1e-6, 1.0)
+    inferred_stride = np.rint(1.0 / observed_ratio).astype(np.int64)
+    unique_stride = sorted(np.unique(inferred_stride).tolist())
+    rate_lookup = {stride_value: idx for idx, stride_value in enumerate(unique_stride)}
+    rate_id = np.asarray(
+        [rate_lookup[item] for item in inferred_stride], dtype=np.int64
+    )
+    return torch.tensor(rate_id, dtype=torch.long), torch.tensor(
+        inferred_stride, dtype=torch.long
+    )
 
 
-def train_single_agf_model(
-    train_windows,
-    train_masks,
-    num_features,
-    seq_len,
-    device,
-    seed,
-    epochs=3,
-    batch_size=32,
-    lr=1e-3,
-    checkpoint_path=None,
-):
-    seed_everything(seed)
-    model = AGF_ADNet(num_nodes=num_features, seq_len=seq_len).to(device)
+def masked_mse(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    target_mask: torch.Tensor,
+) -> torch.Tensor:
+    squared_error = ((prediction - target) * target_mask).pow(2)
+    return squared_error.sum() / target_mask.sum().clamp_min(1.0)
 
-    if checkpoint_path is not None and os.path.exists(checkpoint_path):
-        model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-        return model, None, True
 
+def sample_holdout_mask(missing_mask: torch.Tensor, ratio: float) -> torch.Tensor:
+    observed = ~missing_mask.bool()
+    holdout = ((torch.rand_like(missing_mask) < ratio) & observed).view(
+        missing_mask.size(0), -1
+    )
+    observed_flat = observed.view(missing_mask.size(0), -1)
+
+    for batch_idx in range(holdout.size(0)):
+        if observed_flat[batch_idx].sum() == 0:
+            continue
+        if holdout[batch_idx].any():
+            continue
+        candidate_idx = torch.nonzero(observed_flat[batch_idx], as_tuple=False).squeeze(
+            -1
+        )
+        picked = candidate_idx[
+            torch.randint(0, len(candidate_idx), (1,), device=missing_mask.device)
+        ]
+        holdout[batch_idx, picked] = True
+
+    return holdout.view_as(missing_mask).float()
+
+
+class WarmStartFiller:
+    @staticmethod
+    def _directional_fill(
+        values: torch.Tensor,
+        missing_mask: torch.Tensor,
+        reverse: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if reverse:
+            values = torch.flip(values, dims=[1])
+            missing_mask = torch.flip(missing_mask, dims=[1])
+
+        observed = ~missing_mask.bool()
+        batch_size, time_steps, num_nodes = values.shape
+        filled = torch.zeros_like(values)
+        available = torch.zeros(
+            batch_size, time_steps, num_nodes, device=values.device, dtype=torch.bool
+        )
+
+        last_value = torch.zeros(
+            batch_size, num_nodes, device=values.device, dtype=values.dtype
+        )
+        has_value = torch.zeros(
+            batch_size, num_nodes, device=values.device, dtype=torch.bool
+        )
+
+        for time_idx in range(time_steps):
+            current_observed = observed[:, time_idx, :]
+            current_value = values[:, time_idx, :]
+            last_value = torch.where(current_observed, current_value, last_value)
+            has_value = has_value | current_observed
+            available[:, time_idx, :] = has_value
+            filled[:, time_idx, :] = torch.where(
+                current_observed,
+                current_value,
+                torch.where(has_value, last_value, torch.zeros_like(last_value)),
+            )
+
+        if reverse:
+            filled = torch.flip(filled, dims=[1])
+            available = torch.flip(available, dims=[1])
+
+        return filled, available
+
+    @classmethod
+    def fill(cls, values: torch.Tensor, missing_mask: torch.Tensor) -> torch.Tensor:
+        observed = ~missing_mask.bool()
+        seed = torch.where(observed, values, torch.zeros_like(values))
+
+        forward_fill, forward_available = cls._directional_fill(
+            values, missing_mask, reverse=False
+        )
+        backward_fill, backward_available = cls._directional_fill(
+            values, missing_mask, reverse=True
+        )
+
+        missing = missing_mask.bool()
+        both = missing & forward_available & backward_available
+        forward_only = missing & forward_available & ~backward_available
+        backward_only = missing & ~forward_available & backward_available
+
+        seed = torch.where(both, 0.5 * (forward_fill + backward_fill), seed)
+        seed = torch.where(forward_only, forward_fill, seed)
+        seed = torch.where(backward_only, backward_fill, seed)
+        return seed
+
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, max_len: int = 4096) -> None:
+        super().__init__()
+        position = torch.arange(max_len, dtype=torch.float32).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, d_model, 2, dtype=torch.float32)
+            * (-math.log(10000.0) / d_model)
+        )
+        pe = torch.zeros(max_len, d_model, dtype=torch.float32)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        self.register_buffer("pe", pe, persistent=False)
+
+    def forward(
+        self, length: int, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        return self.pe[:length].to(device=device, dtype=dtype)
+
+
+class TwoExpertGatedImputer(nn.Module):
+    def __init__(
+        self,
+        num_nodes: int,
+        seq_len: int,
+        num_rates: int,
+        graph_hidden_dim: int,
+        gcn_hidden_dim: int,
+        gate_hidden_dim: int,
+        rate_embed_dim: int,
+    ) -> None:
+        super().__init__()
+        self.gcn = GraphGCNReconstructor(
+            num_nodes=num_nodes,
+            graph_hidden_dim=graph_hidden_dim,
+            gcn_hidden_dim=gcn_hidden_dim,
+        )
+        self.freq = FrequencyOnlyReconstructor(num_features=num_nodes, seq_len=seq_len)
+        self.rate_embedding = nn.Embedding(num_rates, rate_embed_dim)
+        gate_input_dim = 6 + rate_embed_dim
+        self.gate = nn.Sequential(
+            nn.Linear(gate_input_dim, gate_hidden_dim),
+            nn.GELU(),
+            nn.Linear(gate_hidden_dim, gate_hidden_dim),
+            nn.GELU(),
+            nn.Linear(gate_hidden_dim, 2),
+        )
+
+    def forward(
+        self,
+        x_input: torch.Tensor,
+        model_missing_mask: torch.Tensor,
+        rate_id: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        x_seed = WarmStartFiller.fill(x_input, model_missing_mask)
+        x_gcn, adjacency = self.gcn(x_seed, model_missing_mask)
+        x_freq = self.freq(x_seed)
+
+        batch_size, time_steps, _ = x_input.shape
+        rate_embed = self.rate_embedding(rate_id).unsqueeze(0).unsqueeze(0)
+        rate_embed = rate_embed.expand(batch_size, time_steps, -1, -1)
+
+        gate_features = torch.stack(
+            [
+                x_seed,
+                model_missing_mask,
+                x_gcn,
+                x_freq,
+                x_gcn - x_seed,
+                x_freq - x_seed,
+            ],
+            dim=-1,
+        )
+        gate_input = torch.cat([gate_features, rate_embed], dim=-1)
+        gate_logits = self.gate(gate_input)
+        gate_logits = gate_logits - gate_logits.max(dim=-1, keepdim=True).values
+        gate_weights = torch.softmax(gate_logits, dim=-1)
+
+        experts = torch.stack([x_gcn, x_freq], dim=-1)
+        x_imputed = (gate_weights * experts).sum(dim=-1)
+        x_complete = torch.where(model_missing_mask.bool(), x_imputed, x_input)
+
+        return {
+            "x_seed": x_seed,
+            "x_gcn": x_gcn,
+            "x_freq": x_freq,
+            "x_imputed": x_imputed,
+            "x_complete": x_complete,
+            "gate_weights": gate_weights,
+            "adjacency": adjacency,
+        }
+
+
+class SamplingAwareTransformerAD(nn.Module):
+    def __init__(
+        self,
+        num_nodes: int,
+        num_rates: int,
+        d_model: int,
+        num_heads: int,
+        num_layers: int,
+        dropout: float,
+        per_variable_dim: int = 16,
+        phase_dim: int = 8,
+    ) -> None:
+        super().__init__()
+        self.num_nodes = num_nodes
+        self.variable_embedding = nn.Embedding(num_nodes, 8)
+        self.rate_embedding = nn.Embedding(num_rates, 8)
+        self.phase_mlp = nn.Sequential(
+            nn.Linear(1, phase_dim),
+            nn.GELU(),
+            nn.Linear(phase_dim, phase_dim),
+        )
+        self.per_variable_proj = nn.Sequential(
+            nn.Linear(1 + 1 + 8 + 8 + phase_dim, per_variable_dim),
+            nn.GELU(),
+            nn.Linear(per_variable_dim, per_variable_dim),
+        )
+        token_input_dim = num_nodes * 2 + num_nodes * per_variable_dim
+        self.token_proj = nn.Linear(token_input_dim, d_model)
+        self.position_encoding = SinusoidalPositionalEncoding(d_model)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=d_model * 4,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+            norm_first=False,
+        )
+        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.reconstruction_head = nn.Sequential(
+            nn.LayerNorm(d_model),
+            nn.Linear(d_model, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, num_nodes),
+        )
+
+    def forward(
+        self,
+        x_complete: torch.Tensor,
+        observed_mask: torch.Tensor,
+        rate_id: torch.Tensor,
+        stride: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, time_steps, num_nodes = x_complete.shape
+        if num_nodes != self.num_nodes:
+            raise ValueError(f"期望 {self.num_nodes} 个变量，收到 {num_nodes}")
+
+        variable_embed = self.variable_embedding(
+            torch.arange(num_nodes, device=x_complete.device)
+        )
+        rate_embed = self.rate_embedding(rate_id)
+
+        time_index = torch.arange(
+            time_steps, device=x_complete.device, dtype=x_complete.dtype
+        ).view(time_steps, 1)
+        stride_value = (
+            stride.to(device=x_complete.device, dtype=x_complete.dtype)
+            .view(1, num_nodes)
+            .clamp_min(1.0)
+        )
+        phase = torch.remainder(time_index, stride_value) / stride_value
+        phase = phase.unsqueeze(-1)
+        phase_embed = self.phase_mlp(phase)
+
+        variable_embed = (
+            variable_embed.unsqueeze(0)
+            .unsqueeze(0)
+            .expand(batch_size, time_steps, -1, -1)
+        )
+        rate_embed = (
+            rate_embed.unsqueeze(0).unsqueeze(0).expand(batch_size, time_steps, -1, -1)
+        )
+        phase_embed = phase_embed.unsqueeze(0).expand(batch_size, -1, -1, -1)
+
+        per_variable_input = torch.cat(
+            [
+                x_complete.unsqueeze(-1),
+                observed_mask.unsqueeze(-1),
+                variable_embed,
+                rate_embed,
+                phase_embed,
+            ],
+            dim=-1,
+        )
+        rate_aware_features = self.per_variable_proj(per_variable_input)
+
+        token_input = torch.cat(
+            [
+                x_complete,
+                observed_mask,
+                rate_aware_features.reshape(batch_size, time_steps, -1),
+            ],
+            dim=-1,
+        )
+        tokens = self.token_proj(token_input)
+        tokens = tokens + self.position_encoding(
+            time_steps, x_complete.device, x_complete.dtype
+        ).unsqueeze(0)
+
+        encoded = self.encoder(tokens)
+        delta = self.reconstruction_head(encoded)
+        return x_complete + delta
+
+
+class FusionAnomalyModel(nn.Module):
+    def __init__(
+        self,
+        num_nodes: int,
+        seq_len: int,
+        num_rates: int,
+        graph_hidden_dim: int,
+        gcn_hidden_dim: int,
+        gate_hidden_dim: int,
+        rate_embed_dim: int,
+        detector_d_model: int,
+        detector_heads: int,
+        detector_layers: int,
+        dropout: float,
+    ) -> None:
+        super().__init__()
+        self.imputer = TwoExpertGatedImputer(
+            num_nodes=num_nodes,
+            seq_len=seq_len,
+            num_rates=num_rates,
+            graph_hidden_dim=graph_hidden_dim,
+            gcn_hidden_dim=gcn_hidden_dim,
+            gate_hidden_dim=gate_hidden_dim,
+            rate_embed_dim=rate_embed_dim,
+        )
+        self.detector = SamplingAwareTransformerAD(
+            num_nodes=num_nodes,
+            num_rates=num_rates,
+            d_model=detector_d_model,
+            num_heads=detector_heads,
+            num_layers=detector_layers,
+            dropout=dropout,
+            per_variable_dim=max(detector_d_model // 8, 8),
+        )
+
+    def forward(
+        self,
+        x_input: torch.Tensor,
+        model_missing_mask: torch.Tensor,
+        structural_missing_mask: torch.Tensor,
+        rate_id: torch.Tensor,
+        stride: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        outputs = self.imputer(x_input, model_missing_mask, rate_id)
+        observed_mask = 1.0 - structural_missing_mask
+        detector_reconstruction = self.detector(
+            outputs["x_complete"], observed_mask, rate_id, stride
+        )
+        detector_error = torch.abs(detector_reconstruction - outputs["x_complete"])
+
+        outputs["detector_reconstruction"] = detector_reconstruction
+        outputs["detector_error"] = detector_error
+        return outputs
+
+
+def compute_losses(
+    outputs: dict[str, torch.Tensor],
+    x_true: torch.Tensor,
+    structural_missing_mask: torch.Tensor,
+    holdout_mask: torch.Tensor,
+    loss_weights: LossWeights,
+    diag_target: float,
+) -> dict[str, torch.Tensor]:
+    fusion_loss = masked_mse(outputs["x_imputed"], x_true, holdout_mask)
+    gcn_loss = masked_mse(outputs["x_gcn"], x_true, holdout_mask)
+    freq_loss = masked_mse(outputs["x_freq"], x_true, holdout_mask)
+    graph_loss = adjacency_balance_loss(outputs["adjacency"], target_diag=diag_target)
+
+    observed_mask = 1.0 - structural_missing_mask
+    detector_target = outputs["x_complete"].detach()
+    detector_loss = masked_mse(
+        outputs["detector_reconstruction"], detector_target, observed_mask
+    )
+
+    total_loss = (
+        loss_weights.fusion * fusion_loss
+        + loss_weights.gcn * gcn_loss
+        + loss_weights.freq * freq_loss
+        + loss_weights.detector * detector_loss
+        + loss_weights.graph * graph_loss
+    )
+    return {
+        "fusion_loss": fusion_loss,
+        "gcn_loss": gcn_loss,
+        "freq_loss": freq_loss,
+        "detector_loss": detector_loss,
+        "graph_loss": graph_loss,
+        "total_loss": total_loss,
+    }
+
+
+def train_model(
+    model: FusionAnomalyModel,
+    train_windows: np.ndarray,
+    train_masks: np.ndarray,
+    rate_id: torch.Tensor,
+    stride: torch.Tensor,
+    device: torch.device,
+    epochs: int,
+    batch_size: int,
+    lr: float,
+    weight_decay: float,
+    holdout_ratio: float,
+    diag_target: float,
+    loss_weights: LossWeights,
+) -> list[dict[str, float]]:
     loader = DataLoader(
         TensorDataset(torch.tensor(train_windows), torch.tensor(train_masks)),
         batch_size=batch_size,
         shuffle=True,
     )
-
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    best_state = None
-    best_loss = float("inf")
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
+    rate_id = rate_id.to(device)
+    stride = stride.to(device)
+    history: list[dict[str, float]] = []
 
     for epoch in range(epochs):
         model.train()
-        total_loss = 0.0
+        meter = {
+            "fusion_loss": 0.0,
+            "gcn_loss": 0.0,
+            "freq_loss": 0.0,
+            "detector_loss": 0.0,
+            "graph_loss": 0.0,
+            "total_loss": 0.0,
+        }
 
-        for x, m in loader:
-            x = x.to(device)
-            m = m.to(device)
+        for x_true, structural_missing_mask in loader:
+            x_true = x_true.to(device)
+            structural_missing_mask = structural_missing_mask.to(device)
+            holdout_mask = sample_holdout_mask(structural_missing_mask, holdout_ratio)
+            model_missing_mask = torch.maximum(structural_missing_mask, holdout_mask)
+            x_input = x_true.masked_fill(model_missing_mask.bool(), 0.0)
 
-            observed = ~m.bool()
-            rand_drop = (torch.rand_like(x) < 0.1) & observed
-            target_mask = rand_drop.float()
-            if not rand_drop.any():
-                target_mask = observed.float()
-
-            m_input = m.clone()
-            m_input[rand_drop] = 1.0
-            x_input = apply_missing_mask(x, m_input)
-
-            x_rec, adj, _ = model(x_input, m_input)
-            loss = dual_domain_loss(x_rec, x, m, target_mask, adj)
+            outputs = model(
+                x_input, model_missing_mask, structural_missing_mask, rate_id, stride
+            )
+            losses = compute_losses(
+                outputs=outputs,
+                x_true=x_true,
+                structural_missing_mask=structural_missing_mask,
+                holdout_mask=holdout_mask,
+                loss_weights=loss_weights,
+                diag_target=diag_target,
+            )
 
             optimizer.zero_grad()
-            loss.backward()
+            losses["total_loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            total_loss += loss.item()
 
-        avg_loss = total_loss / max(len(loader), 1)
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            best_state = copy.deepcopy(model.state_dict())
+            for key in meter:
+                meter[key] += float(losses[key].detach().cpu())
 
-        print(f"  Seed {seed} Epoch {epoch + 1:02d}/{epochs}  Loss: {avg_loss:.6f}")
-
-    if best_state is not None:
-        model.load_state_dict(best_state)
-    if checkpoint_path is not None:
-        torch.save(model.state_dict(), checkpoint_path)
-
-    return model, best_loss, False
-
-
-def build_test_labels(num_scores):
-    labels = np.zeros(num_scores, dtype=int)
-    split_idx = min(TEST_SPLIT_INDEX, num_scores)
-    labels[split_idx:] = 1
-    return labels
-
-
-def plot_results(
-    scores,
-    threshold,
-    split_idx,
-    raw_scores=None,
-    save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png',
-):
-    plt.figure(figsize=(6, 5))
-    if raw_scores is not None:
-        plt.plot(raw_scores, label='原始异常分数', alpha=0.25, color='gray')
-    plt.plot(scores, label='平滑异常分数', alpha=0.9)
-    plt.axhline(y=threshold, color='r', linestyle='--', label=f'阈值 ({threshold:.4f})')
-    plt.axvline(x=split_idx, color='g', linestyle=':', label='测试集分界')
-    plt.xlabel('测试样本索引')
-    plt.ylabel('异常分数')
-    plt.title('AGF-ADNet持续故障检测')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-
-    plt.tight_layout()
-    # plt.show()
-    plt.savefig(save_path, dpi=150)
-    print(f"\nPlot saved to: {save_path}")
-    plt.close()
-
-# ==========================================
-# 9. FIXED: Training Pipeline
-# ==========================================
-def train():
-    seed_everything(40)
-
-    SEQ_LEN = 50
-    DATA_DIR = "./data"
-    MAX_EPOCHS = 3
-    BATCH_SIZE = 32
-    ENSEMBLE_SEEDS = (40, 41, 42)
-    EWMA_ALPHA = 0.02
-    THRESHOLD_STD = 1.5
-    MIN_RUN = 150
-    CKPT_DIR = "./agf_adnet_checkpoints"
-    builder = DatasetBuilder(SEQ_LEN)
-
-    # Load train and test data from separate directories
-    # Use file_pattern to select only files with consistent column counts
-    TRAIN_PATTERN = "train_*.csv"      # 18-col files
-    TEST_PATTERN  = "test_*.csv"        # 18-col files
-
-    print("Loading training data...")
-    train_data, train_mask = builder.load_dir(os.path.join(DATA_DIR, "train"), TRAIN_PATTERN)
-    num_features = builder.num_features
-    print(f"Training data: {train_data.shape}, num_features={num_features}")
-
-    print("\nLoading test data...")
-    test_data, test_mask = builder.load_dir(os.path.join(DATA_DIR, "test"), TEST_PATTERN)
-    print(f"Test data: {test_data.shape}")
-
-    # Keep the original zero-filled standardization used by the better-performing
-    # multirate transformer baseline; on this dataset it preserves useful missing-pattern cues.
-    train_filled = np.nan_to_num(train_data, nan=0.0)
-    test_filled = np.nan_to_num(test_data, nan=0.0)
-    scaler = StandardScaler()
-    train_data_scaled = scaler.fit_transform(train_filled).astype(np.float32)
-    test_data_scaled = scaler.transform(test_filled).astype(np.float32)
-
-    # Create sliding windows
-    Xtr, Mtr = builder.create_windows(train_data_scaled, train_mask)
-    Xte, Mte = builder.create_windows(test_data_scaled, test_mask)
-
-    if len(Xtr) == 0: 
-        print("No training data available!")
-        return
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Device: {device}")
-    os.makedirs(CKPT_DIR, exist_ok=True)
-
-    ensemble_models = []
-    print("Starting training...")
-    print("Backbone: AGF-ADNet snapshot ensemble + persistent fault detector")
-    for seed in ENSEMBLE_SEEDS:
-        checkpoint_path = os.path.join(CKPT_DIR, f"agf_adnet_seed{seed}.pth")
-        model, best_loss, loaded = train_single_agf_model(
-            Xtr,
-            Mtr,
-            num_features=num_features,
-            seq_len=SEQ_LEN,
-            device=device,
-            seed=seed,
-            epochs=MAX_EPOCHS,
-            batch_size=BATCH_SIZE,
-            lr=1e-3,
-            checkpoint_path=checkpoint_path,
-        )
-        if loaded:
-            print(f"  Loaded checkpoint for seed {seed}: {checkpoint_path}")
-        else:
-            print(f"  Best loss for seed {seed}: {best_loss:.6f}")
-            print(f"  Checkpoint saved to: {checkpoint_path}")
-        ensemble_models.append(model)
-
-    print("\nTraining completed. Computing threshold from training set...")
-
-    train_score_list = []
-    test_score_list = []
-    for seed, model in zip(ENSEMBLE_SEEDS, ensemble_models):
-        train_seed_scores = anomaly_scores(model, Xtr, Mtr, device=device, batch_size=BATCH_SIZE)
-        test_seed_scores = anomaly_scores(model, Xte, Mte, device=device, batch_size=BATCH_SIZE)
-        train_score_list.append(train_seed_scores)
-        test_score_list.append(test_seed_scores)
+        epoch_stats = {key: value / max(len(loader), 1) for key, value in meter.items()}
+        history.append(epoch_stats)
         print(
-            f"  Seed {seed} score mean: "
-            f"train={np.mean(train_seed_scores):.6f}, test={np.mean(test_seed_scores):.6f}"
+            f"Epoch {epoch + 1:02d}/{epochs} "
+            f"total={epoch_stats['total_loss']:.5f} "
+            f"fusion={epoch_stats['fusion_loss']:.5f} "
+            f"det={epoch_stats['detector_loss']:.5f} "
+            f"graph={epoch_stats['graph_loss']:.5f}"
         )
 
-    train_scores = np.mean(np.stack(train_score_list, axis=0), axis=0)
-    test_scores_arr = np.mean(np.stack(test_score_list, axis=0), axis=0)
-    raw_threshold = float(np.mean(train_scores) + np.std(train_scores))
-    
-    print(f"\nTraining Set Score Stats (raw):")
-    print(f"  Mean: {np.mean(train_scores):.6f}")
-    print(f"  Std:  {np.std(train_scores):.6f}")
-    print(f"  Point-wise Threshold (mean + 1std): {raw_threshold:.6f}")
-    
-    print("\nEvaluating on test set...")
-    test_labels = build_test_labels(len(test_scores_arr))
-    test_split_idx = min(TEST_SPLIT_INDEX, len(test_scores_arr))
+    return history
 
-    raw_pred = (test_scores_arr > raw_threshold).astype(int)
-    raw_acc = accuracy_score(test_labels, raw_pred)
-    raw_prec = precision_score(test_labels, raw_pred, zero_division=0)
-    raw_rec = recall_score(test_labels, raw_pred, zero_division=0)
-    raw_f1 = f1_score(test_labels, raw_pred, zero_division=0)
 
-    train_smoothed, test_smoothed, threshold, point_pred, y_pred = persistent_fault_detection(
-        train_scores,
-        test_scores_arr,
-        alpha=EWMA_ALPHA,
-        threshold_std=THRESHOLD_STD,
-        min_run=MIN_RUN,
+@torch.no_grad()
+def reconstruct_full_sequence(
+    model: FusionAnomalyModel,
+    windows: np.ndarray,
+    masks: np.ndarray,
+    rate_id: torch.Tensor,
+    stride: torch.Tensor,
+    device: torch.device,
+    batch_size: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    loader = DataLoader(
+        TensorDataset(torch.tensor(windows), torch.tensor(masks)),
+        batch_size=batch_size,
+        shuffle=False,
+    )
+    rate_id = rate_id.to(device)
+    stride = stride.to(device)
+
+    completed = []
+    gate_weights = []
+    adj_samples = []
+    model.eval()
+
+    for x_true, structural_missing_mask in loader:
+        x_true = x_true.to(device)
+        structural_missing_mask = structural_missing_mask.to(device)
+        x_input = x_true.masked_fill(structural_missing_mask.bool(), 0.0)
+        outputs = model(
+            x_input, structural_missing_mask, structural_missing_mask, rate_id, stride
+        )
+        completed.append(outputs["x_complete"][:, -1, :].cpu().numpy())
+        gate_weights.append(outputs["gate_weights"][:, -1, :, :].cpu().numpy())
+        adj_samples.append(outputs["adjacency"].cpu().numpy())
+
+    return (
+        np.concatenate(completed, axis=0).astype(np.float32),
+        np.concatenate(gate_weights, axis=0).astype(np.float32),
+        np.concatenate(adj_samples, axis=0).astype(np.float32),
     )
 
-    print(f"\nAnomaly Detection Results:")
-    print(f"  Raw Mean Score:      {np.mean(test_scores_arr):.6f}")
-    print(f"  Raw Std Score:       {np.std(test_scores_arr):.6f}")
-    print(f"  Smoothed Mean Score: {np.mean(test_smoothed):.6f}")
-    print(f"  Smoothed Std Score:  {np.std(test_smoothed):.6f}")
-    print(f"  Threshold (smoothed train mean + {THRESHOLD_STD:.1f}std): {threshold:.6f}")
-    print(f"  EWMA alpha: {EWMA_ALPHA:.2f}, minimum persistent run: {MIN_RUN}")
-    print(f"  Test split: [0:{test_split_idx}) normal, [{test_split_idx}:{len(test_smoothed)}) anomaly")
-    print(f"  Point alarms: {(point_pred == 1).sum()} / {len(point_pred)}")
-    print(f"  Persistent alarms: {(y_pred == 1).sum()} / {len(y_pred)}")
 
-    acc = accuracy_score(test_labels, y_pred)
-    prec = precision_score(test_labels, y_pred, zero_division=0)
-    rec = recall_score(test_labels, y_pred, zero_division=0)
-    f1 = f1_score(test_labels, y_pred, zero_division=0)
+@torch.no_grad()
+def collect_window_statistics(
+    model: FusionAnomalyModel,
+    windows: np.ndarray,
+    masks: np.ndarray,
+    rate_id: torch.Tensor,
+    stride: torch.Tensor,
+    device: torch.device,
+    batch_size: int,
+) -> dict[str, np.ndarray]:
+    loader = DataLoader(
+        TensorDataset(torch.tensor(windows), torch.tensor(masks)),
+        batch_size=batch_size,
+        shuffle=False,
+    )
+    rate_id = rate_id.to(device)
+    stride = stride.to(device)
 
-    print(f"\nPoint-wise Raw Metrics:")
-    print(f"  Accuracy:  {raw_acc:.4f}")
-    print(f"  Precision: {raw_prec:.4f}")
-    print(f"  Recall:    {raw_rec:.4f}")
-    print(f"  F1-Score:  {raw_f1:.4f}")
+    collected = {
+        "detector_score": [],
+        "disagreement_score": [],
+        "gate_entropy": [],
+    }
 
-    print(f"\nPersistent Fault Metrics:")
-    print(f"  Accuracy:  {acc:.4f}")
-    print(f"  Precision: {prec:.4f}")
-    print(f"  Recall:    {rec:.4f}")
-    print(f"  F1-Score:  {f1:.4f}")
+    model.eval()
+    for x_true, structural_missing_mask in loader:
+        x_true = x_true.to(device)
+        structural_missing_mask = structural_missing_mask.to(device)
+        observed_mask = 1.0 - structural_missing_mask
+        x_input = x_true.masked_fill(structural_missing_mask.bool(), 0.0)
+        outputs = model(
+            x_input, structural_missing_mask, structural_missing_mask, rate_id, stride
+        )
 
-    # Visualization
-    plot_results(test_smoothed, threshold, test_split_idx, raw_scores=test_scores_arr)
-    
-    return ensemble_models, test_smoothed
+        detector_sq = (
+            (outputs["detector_reconstruction"] - outputs["x_complete"]) * observed_mask
+        ).pow(2)
+        detector_score = detector_sq.sum(dim=(1, 2)) / observed_mask.sum(
+            dim=(1, 2)
+        ).clamp_min(1.0)
+        disagreement_score = torch.abs(outputs["x_gcn"] - outputs["x_freq"]).mean(
+            dim=(1, 2)
+        )
+        gate = outputs["gate_weights"].clamp_min(1e-8)
+        gate_entropy = -(gate * gate.log()).sum(dim=-1).mean(dim=(1, 2))
+
+        collected["detector_score"].append(
+            detector_score.cpu().numpy().astype(np.float32)
+        )
+        collected["disagreement_score"].append(
+            disagreement_score.cpu().numpy().astype(np.float32)
+        )
+        collected["gate_entropy"].append(gate_entropy.cpu().numpy().astype(np.float32))
+
+    return {
+        key: np.concatenate(value, axis=0).astype(np.float32)
+        for key, value in collected.items()
+    }
+
+
+def normalize_scores(
+    train_values: np.ndarray, eval_values: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    mean = float(np.mean(train_values))
+    std = float(np.std(train_values))
+    std = max(std, 1e-6)
+    return (
+        ((train_values - mean) / std).astype(np.float32),
+        ((eval_values - mean) / std).astype(np.float32),
+    )
+
+
+def combine_scores(
+    train_stats: dict[str, np.ndarray],
+    eval_stats: dict[str, np.ndarray],
+    disagreement_weight: float,
+    shift_weight: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    train_det, eval_det = normalize_scores(
+        train_stats["detector_score"], eval_stats["detector_score"]
+    )
+    train_gap, eval_gap = normalize_scores(
+        train_stats["disagreement_score"], eval_stats["disagreement_score"]
+    )
+    train_shift, eval_shift = normalize_scores(
+        train_stats["shift_score"], eval_stats["shift_score"]
+    )
+    train_score = (
+        np.abs(train_det) + disagreement_weight * train_gap + shift_weight * train_shift
+    )
+    eval_score = (
+        np.abs(eval_det) + disagreement_weight * eval_gap + shift_weight * eval_shift
+    )
+    return train_score.astype(np.float32), eval_score.astype(np.float32)
+
+
+def choose_threshold(
+    train_scores: np.ndarray,
+    std_factor: float,
+    quantile: float,
+) -> float:
+    gaussian_threshold = float(
+        np.mean(train_scores) + std_factor * np.std(train_scores)
+    )
+    quantile_threshold = float(np.quantile(train_scores, quantile))
+    return max(gaussian_threshold, quantile_threshold)
+
+
+def compute_metrics(
+    labels: np.ndarray, scores: np.ndarray, threshold: float
+) -> dict[str, float]:
+    prediction = (scores >= threshold).astype(np.int64)
+    return {
+        "threshold": float(threshold),
+        "accuracy": float(accuracy_score(labels, prediction)),
+        "precision": float(precision_score(labels, prediction, zero_division=0)),
+        "recall": float(recall_score(labels, prediction, zero_division=0)),
+        "f1": float(f1_score(labels, prediction, zero_division=0)),
+    }
+
+
+def apply_min_anomaly_duration(
+    prediction: np.ndarray,
+    min_duration: int,
+) -> np.ndarray:
+    if min_duration <= 1:
+        return prediction.astype(np.int64)
+
+    filtered = np.zeros_like(prediction, dtype=np.int64)
+    run_start: int | None = None
+
+    for idx in range(len(prediction) + 1):
+        current = int(prediction[idx]) if idx < len(prediction) else 0
+        if current == 1 and run_start is None:
+            run_start = idx
+            continue
+        if current == 0 and run_start is not None:
+            if idx - run_start >= min_duration:
+                filtered[run_start:idx] = 1
+            run_start = None
+
+    return filtered
+
+
+def compute_metrics_from_prediction(
+    labels: np.ndarray,
+    prediction: np.ndarray,
+    threshold: float,
+) -> dict[str, float]:
+    return {
+        "threshold": float(threshold),
+        "accuracy": float(accuracy_score(labels, prediction)),
+        "precision": float(precision_score(labels, prediction, zero_division=0)),
+        "recall": float(recall_score(labels, prediction, zero_division=0)),
+        "f1": float(f1_score(labels, prediction, zero_division=0)),
+    }
+
+
+def apply_ewaf(scores: np.ndarray, alpha: float) -> np.ndarray:
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError(f"ewaf alpha 必须在 (0, 1] 内，收到 {alpha}")
+    if scores.size == 0:
+        return scores.astype(np.float32)
+
+    smoothed = np.empty_like(scores, dtype=np.float32)
+    smoothed[0] = np.float32(scores[0])
+    for idx in range(1, len(scores)):
+        smoothed[idx] = np.float32(
+            alpha * scores[idx] + (1.0 - alpha) * smoothed[idx - 1]
+        )
+    return smoothed
+
+
+def apply_ewaf_by_segments(
+    scores: np.ndarray,
+    alpha: float,
+    segment_lengths: list[int] | None = None,
+) -> np.ndarray:
+    if not segment_lengths:
+        return apply_ewaf(scores, alpha)
+
+    parts = []
+    cursor = 0
+    for length in segment_lengths:
+        next_cursor = min(cursor + length, len(scores))
+        parts.append(apply_ewaf(scores[cursor:next_cursor], alpha))
+        cursor = next_cursor
+        if cursor >= len(scores):
+            break
+
+    if cursor < len(scores):
+        parts.append(apply_ewaf(scores[cursor:], alpha))
+
+    return np.concatenate(parts, axis=0).astype(np.float32)
+
+
+def save_training_curve(history: list[dict[str, float]], output_path: Path) -> None:
+    import matplotlib.pyplot as plt
+
+    configure_chinese_font()
+    epochs = np.arange(1, len(history) + 1)
+    total = [item["total_loss"] for item in history]
+    fusion = [item["fusion_loss"] for item in history]
+    detector = [item["detector_loss"] for item in history]
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(epochs, total, label="总损失", color="#1D3557")
+    ax.plot(epochs, fusion, label="插补损失", color="#457B9D")
+    ax.plot(epochs, detector, label="检测损失", color="#E63946")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Loss")
+    ax.set_title("训练曲线")
+    ax.grid(alpha=0.2)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def plot_anomaly_scores(
+    scores: np.ndarray,
+    threshold: float,
+    output_path: Path,
+    title: str,
+) -> None:
+    import matplotlib.pyplot as plt
+
+    configure_chinese_font()
+    fig, ax = plt.subplots(figsize=(16, 5))
+    x_axis = np.arange(1, len(scores) + 1)
+    ax.plot(x_axis, scores, color="#0B6E4F", linewidth=1.6, label="异常分数")
+    ax.axhline(
+        threshold,
+        color="#D1495B",
+        linestyle="--",
+        linewidth=1.4,
+        label=f"阈值 = {threshold:.4f}",
+    )
+    ax.axvline(
+        TEST_SPLIT_INDEX,
+        color="#222222",
+        linestyle="--",
+        linewidth=1.2,
+        label="正常/异常分界",
+    )
+    ax.fill_between(
+        x_axis[:TEST_SPLIT_INDEX],
+        scores[:TEST_SPLIT_INDEX],
+        alpha=0.08,
+        color="#2A9D8F",
+    )
+    ax.fill_between(
+        x_axis[TEST_SPLIT_INDEX - 1 :],
+        scores[TEST_SPLIT_INDEX - 1 :],
+        alpha=0.08,
+        color="#E76F51",
+    )
+    ax.set_xlabel("窗口索引")
+    ax.set_ylabel("分数")
+    ax.set_title(title)
+    ax.grid(alpha=0.2)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180)
+    plt.close(fig)
+
+
+def save_gate_statistics(
+    gate_weights: np.ndarray,
+    feature_names: list[str],
+    output_path: Path,
+) -> None:
+    mean_gate = gate_weights.mean(axis=0)
+    df = pd.DataFrame(
+        {
+            "feature": feature_names,
+            "gcn_weight": mean_gate[:, 0],
+            "freq_weight": mean_gate[:, 1],
+        }
+    )
+    df.to_csv(output_path, index=False)
+
+
+def build_window_feature_matrix(windows: np.ndarray) -> np.ndarray:
+    features = []
+    for column_slice in (slice(0, 6), slice(6, 12), slice(12, 18), slice(0, 18)):
+        block = windows[:, :, column_slice]
+        features.append(block.mean(axis=1))
+        features.append(block.std(axis=1))
+
+    features.append(np.abs(np.diff(windows, axis=1)).mean(axis=1))
+    fft_feature = (
+        np.abs(np.fft.rfft(windows, axis=1))[:, 1:6, :].mean(axis=1).astype(np.float32)
+    )
+    features.append(fft_feature)
+    return np.concatenate(features, axis=1).astype(np.float32)
+
+
+def compute_distribution_shift_scores(
+    train_windows: np.ndarray,
+    eval_windows: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    train_features = build_window_feature_matrix(train_windows)
+    eval_features = build_window_feature_matrix(eval_windows)
+    feature_mean = train_features.mean(axis=0)
+    feature_std = np.maximum(train_features.std(axis=0), 1e-6)
+
+    train_z = (train_features - feature_mean) / feature_std
+    eval_z = (eval_features - feature_mean) / feature_std
+    train_score = np.sqrt((train_z**2).mean(axis=1))
+    eval_score = np.sqrt((eval_z**2).mean(axis=1))
+    return train_score.astype(np.float32), eval_score.astype(np.float32)
+
+
+def main() -> None:
+    args = parse_args()
+    if not 0.0 < args.ewaf_alpha <= 1.0:
+        raise ValueError(f"--ewaf-alpha 必须在 (0, 1] 内，收到 {args.ewaf_alpha}")
+    if args.min_anomaly_duration < 1:
+        raise ValueError(
+            f"--min-anomaly-duration 必须 >= 1，收到 {args.min_anomaly_duration}"
+        )
+    seed_everything(args.seed)
+    configure_chinese_font()
+
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device = choose_device(args.device)
+    loss_weights = LossWeights()
+
+    train_raw, train_mask, feature_names = load_csv_series(args.train_glob)
+    test_raw, test_mask, _ = load_csv_series(args.test_glob)
+
+    scaler = ObservedStandardScaler().fit(train_raw, train_mask)
+    train_scaled = scaler.transform(train_raw, train_mask)
+    test_scaled = scaler.transform(test_raw, test_mask)
+
+    train_impute_windows, train_impute_masks = build_windows(
+        train_scaled,
+        train_mask.astype(np.float32),
+        seq_len=args.seq_len,
+        stride=args.stride,
+    )
+    test_impute_windows, test_impute_masks = build_windows(
+        test_scaled,
+        test_mask.astype(np.float32),
+        seq_len=args.seq_len,
+        stride=args.stride,
+    )
+    train_eval_windows, train_eval_masks = build_standard_windows(
+        train_scaled,
+        train_mask.astype(np.float32),
+        seq_len=args.seq_len,
+        stride=args.stride,
+    )
+    test_eval_windows, test_eval_masks, test_labels = build_prompt_test_windows(
+        test_scaled,
+        test_mask.astype(np.float32),
+        seq_len=args.seq_len,
+        stride=args.stride,
+    )
+
+    rate_id, stride = infer_rate_metadata(train_mask.astype(np.float32))
+    print(f"使用设备: {device}")
+    print(f"训练插补窗口: {train_impute_windows.shape}")
+    print(f"训练评分窗口: {train_eval_windows.shape}")
+    print(f"测试评分窗口: {test_eval_windows.shape}")
+    print(f"采样率分组 rate_id: {rate_id.tolist()}")
+    print(f"推断步长 stride: {stride.tolist()}")
+
+    model = FusionAnomalyModel(
+        num_nodes=train_scaled.shape[1],
+        seq_len=args.seq_len,
+        num_rates=int(rate_id.max().item()) + 1,
+        graph_hidden_dim=args.graph_hidden_dim,
+        gcn_hidden_dim=args.gcn_hidden_dim,
+        gate_hidden_dim=args.gate_hidden_dim,
+        rate_embed_dim=args.rate_embed_dim,
+        detector_d_model=args.detector_d_model,
+        detector_heads=args.detector_heads,
+        detector_layers=args.detector_layers,
+        dropout=args.dropout,
+    ).to(device)
+
+    history = train_model(
+        model=model,
+        train_windows=train_impute_windows,
+        train_masks=train_impute_masks,
+        rate_id=rate_id,
+        stride=stride,
+        device=device,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        holdout_ratio=args.holdout_ratio,
+        diag_target=args.diag_target,
+        loss_weights=loss_weights,
+    )
+
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "args": vars(args),
+            "rate_id": rate_id,
+            "stride": stride,
+            "loss_weights": asdict(loss_weights),
+        },
+        output_dir / "model.pt",
+    )
+
+    train_complete_scaled, train_gate_weights, train_adjacency = (
+        reconstruct_full_sequence(
+            model=model,
+            windows=train_impute_windows,
+            masks=train_impute_masks,
+            rate_id=rate_id,
+            stride=stride,
+            device=device,
+            batch_size=args.batch_size,
+        )
+    )
+    test_complete_scaled, test_gate_weights, _ = reconstruct_full_sequence(
+        model=model,
+        windows=test_impute_windows,
+        masks=test_impute_masks,
+        rate_id=rate_id,
+        stride=stride,
+        device=device,
+        batch_size=args.batch_size,
+    )
+    train_complete = scaler.inverse_transform(train_complete_scaled)
+    test_complete = scaler.inverse_transform(test_complete_scaled)
+
+    save_csv(train_complete, feature_names, output_dir / "train_completed.csv")
+    save_csv(test_complete, feature_names, output_dir / "test_completed.csv")
+    save_gate_statistics(
+        train_gate_weights, feature_names, output_dir / "train_gate_weights.csv"
+    )
+    save_gate_statistics(
+        test_gate_weights, feature_names, output_dir / "test_gate_weights.csv"
+    )
+    summarize_adjacency(train_adjacency)
+    save_adjacency_heatmap(train_adjacency, output_dir / "train_adjacency_heatmap.png")
+    save_adjacency_heatmap(
+        train_adjacency,
+        output_dir / "train_adjacency_heatmap_offdiag.png",
+        suppress_diagonal=True,
+    )
+
+    train_stats = collect_window_statistics(
+        model=model,
+        windows=train_eval_windows,
+        masks=train_eval_masks,
+        rate_id=rate_id,
+        stride=stride,
+        device=device,
+        batch_size=args.batch_size,
+    )
+    test_stats = collect_window_statistics(
+        model=model,
+        windows=test_eval_windows,
+        masks=test_eval_masks,
+        rate_id=rate_id,
+        stride=stride,
+        device=device,
+        batch_size=args.batch_size,
+    )
+
+    train_complete_eval_windows, _ = build_standard_windows(
+        train_complete_scaled,
+        np.zeros_like(train_mask, dtype=np.float32),
+        seq_len=args.seq_len,
+        stride=args.stride,
+    )
+    test_complete_eval_windows, _, _ = build_prompt_test_windows(
+        test_complete_scaled,
+        np.zeros_like(test_mask, dtype=np.float32),
+        seq_len=args.seq_len,
+        stride=args.stride,
+    )
+    train_shift_scores, test_shift_scores = compute_distribution_shift_scores(
+        train_windows=train_complete_eval_windows,
+        eval_windows=test_complete_eval_windows,
+    )
+    train_stats["shift_score"] = train_shift_scores
+    test_stats["shift_score"] = test_shift_scores
+
+    train_raw_scores, test_raw_scores = combine_scores(
+        train_stats=train_stats,
+        eval_stats=test_stats,
+        disagreement_weight=args.score_disagreement_weight,
+        shift_weight=args.score_shift_weight,
+    )
+    train_scores = apply_ewaf_by_segments(train_raw_scores, args.ewaf_alpha)
+    test_scores = apply_ewaf_by_segments(
+        test_raw_scores,
+        args.ewaf_alpha,
+        segment_lengths=[TEST_WINDOW_COUNT, TEST_WINDOW_COUNT],
+    )
+    threshold = choose_threshold(
+        train_scores=train_scores,
+        std_factor=args.threshold_std_factor,
+        quantile=args.threshold_quantile,
+    )
+    threshold_prediction = (test_scores >= threshold).astype(np.int64)
+    final_prediction = apply_min_anomaly_duration(
+        threshold_prediction,
+        args.min_anomaly_duration,
+    )
+    metrics = compute_metrics_from_prediction(
+        test_labels,
+        final_prediction,
+        threshold,
+    )
+
+    prediction_df = pd.DataFrame(
+        {
+            "sample_index": np.arange(1, len(test_scores) + 1),
+            "label": test_labels,
+            "detector_score": test_stats["detector_score"],
+            "disagreement_score": test_stats["disagreement_score"],
+            "gate_entropy": test_stats["gate_entropy"],
+            "shift_score": test_stats["shift_score"],
+            "raw_final_score": test_raw_scores,
+            "final_score": test_scores,
+            "threshold_prediction": threshold_prediction,
+            "prediction": final_prediction,
+        }
+    )
+    prediction_df.to_csv(output_dir / "test_predictions.csv", index=False)
+
+    summary = {
+        "device": str(device),
+        "config": vars(args),
+        "loss_weights": asdict(loss_weights),
+        "metrics": metrics,
+        "ewaf_alpha": args.ewaf_alpha,
+        "min_anomaly_duration": args.min_anomaly_duration,
+        "train_raw_score_mean": float(np.mean(train_raw_scores)),
+        "train_raw_score_std": float(np.std(train_raw_scores)),
+        "train_score_mean": float(np.mean(train_scores)),
+        "train_score_std": float(np.std(train_scores)),
+        "train_threshold_quantile": float(
+            np.quantile(train_scores, args.threshold_quantile)
+        ),
+        "rate_id": rate_id.tolist(),
+        "stride": stride.tolist(),
+    }
+    with open(output_dir / "metrics.json", "w", encoding="utf-8") as file:
+        json.dump(summary, file, ensure_ascii=False, indent=2)
+
+    save_training_curve(history, output_dir / "training_curve.png")
+    plot_anomaly_scores(
+        scores=test_scores,
+        threshold=threshold,
+        output_path=output_dir / "anomaly_scores.png",
+        title="GCN + 频域门控融合 Transformer 异常检测",
+    )
+
+    print(json.dumps(metrics, ensure_ascii=False, indent=2))
+    print("输出文件:")
+    print(f"  模型: {output_dir / 'model.pt'}")
+    print(f"  Train 补全: {output_dir / 'train_completed.csv'}")
+    print(f"  Test 补全 : {output_dir / 'test_completed.csv'}")
+    print(f"  门控权重 : {output_dir / 'train_gate_weights.csv'}")
+    print(f"  预测结果 : {output_dir / 'test_predictions.csv'}")
+    print(f"  指标汇总 : {output_dir / 'metrics.json'}")
+    print(f"  曲线图   : {output_dir / 'anomaly_scores.png'}")
+
 
 if __name__ == "__main__":
-    model, scores = train()
+    main()
