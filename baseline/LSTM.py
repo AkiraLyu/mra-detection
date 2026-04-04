@@ -12,13 +12,15 @@ import os
 import glob
 from pathlib import Path
 
-from window_utils import build_prompt_test_windows
+from window_utils import apply_ewaf_by_segments, build_prompt_test_windows
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
 WINDOW_START_INDEX = 49
 WINDOW_SAMPLE_COUNT = 4000
 TEST_SPLIT_INDEX = 2000
+USE_EWAF = True
+EWAF_ALPHA = 0.15
 
 # ==========================================
 # 1. 数据读取函数
@@ -192,6 +194,8 @@ with torch.no_grad():
     train_loss_dist = torch.mean(
         (train_predictions - train_tensor_eval) ** 2, dim=[1, 2]
     ).cpu().numpy()
+    if USE_EWAF:
+        train_loss_dist = apply_ewaf_by_segments(train_loss_dist, EWAF_ALPHA)
 
     test_tensor_eval = test_tensor.to(device)
     test_predictions = model(test_tensor_eval)
@@ -200,6 +204,12 @@ with torch.no_grad():
     ).cpu().numpy()
 
 test_split_idx = int(np.sum(test_labels == 0))
+if USE_EWAF:
+    test_loss_dist = apply_ewaf_by_segments(
+        test_loss_dist,
+        EWAF_ALPHA,
+        [test_split_idx, len(test_loss_dist) - test_split_idx],
+    )
 
 # 设定阈值
 threshold = float(np.mean(train_loss_dist))

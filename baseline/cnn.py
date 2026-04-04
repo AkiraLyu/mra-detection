@@ -13,13 +13,15 @@ import matplotlib.pyplot as plt
 import os
 import glob
 
-from window_utils import build_prompt_test_windows
+from window_utils import apply_ewaf_by_segments, build_prompt_test_windows
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
 WINDOW_START_INDEX = 49
 WINDOW_SAMPLE_COUNT = 4000
 TEST_SPLIT_INDEX = 2000
+USE_EWAF = True
+EWAF_ALPHA = 0.15
 
 def plot_results(scores, threshold, split_idx, save_path='/home/akira/codespace/mra-detection/anomaly_detection_results.png'):
     """绘制异常检测可视化图（与 mra.py 完全一致）"""
@@ -215,6 +217,8 @@ def train_model():
 
         recon_train = model(X_train_dev)
         train_scores = (recon_train - X_train_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()
+        if USE_EWAF:
+            train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
@@ -224,6 +228,12 @@ def train_model():
         test_scores = (recon_test - X_test_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()
         y_true = test_labels
         split_idx = int(np.sum(y_true == 0))
+        if USE_EWAF:
+            test_scores = apply_ewaf_by_segments(
+                test_scores,
+                EWAF_ALPHA,
+                [split_idx, len(test_scores) - split_idx],
+            )
         y_pred = (test_scores > threshold).astype(int)
 
         print(f"Device: {device}")

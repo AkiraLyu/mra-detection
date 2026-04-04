@@ -11,7 +11,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from torch.utils.data import DataLoader, TensorDataset
 from model.mstransformer import MSTransformer
-from window_utils import build_prompt_test_windows_with_mask
+from window_utils import apply_ewaf_by_segments, build_prompt_test_windows_with_mask
 
 import random
 
@@ -19,6 +19,8 @@ import random
 WINDOW_START_INDEX = 49
 WINDOW_SAMPLE_COUNT = 4000
 TEST_SPLIT_INDEX = 2000
+USE_EWAF = True
+EWAF_ALPHA = 0.15
 
 
 def seed_everything(seed=40):
@@ -267,6 +269,8 @@ def run_full_detection():
 
     # --- E. 计算训练集异常分数 (用于确定阈值) ---
     train_scores = score_dataset(model, X_train, M_train, device=device, sampling_rate=s_rate, batch_size=batch_size)
+    if USE_EWAF:
+        train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
     threshold = float(np.mean(train_scores)+np.std(train_scores))
 
     print(f"\nTraining Set Score Stats:")
@@ -277,6 +281,12 @@ def run_full_detection():
     # --- F. 计算测试集异常分数 ---
     test_scores_arr = score_dataset(model, X_test, M_test, device=device, sampling_rate=s_rate, batch_size=batch_size)
     split_idx = int(np.sum(test_labels == 0))
+    if USE_EWAF:
+        test_scores_arr = apply_ewaf_by_segments(
+            test_scores_arr,
+            EWAF_ALPHA,
+            [split_idx, len(test_scores_arr) - split_idx],
+        )
 
     print(f"\nAnomaly Detection Results:")
     print(f"  Mean Score: {np.mean(test_scores_arr):.6f}")

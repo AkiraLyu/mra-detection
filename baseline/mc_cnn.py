@@ -36,7 +36,7 @@ import torch.optim as optim
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from torch.utils.data import DataLoader, TensorDataset
 
-from window_utils import build_prompt_test_windows_with_mask
+from window_utils import apply_ewaf_by_segments, build_prompt_test_windows_with_mask
 
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
@@ -45,6 +45,8 @@ EPS = 1e-6
 WINDOW_START_INDEX = 49
 WINDOW_SAMPLE_COUNT = 4000
 TEST_SPLIT_INDEX = 2000
+USE_EWAF = True
+EWAF_ALPHA = 0.15
 
 
 def seed_everything(seed: int = 42) -> None:
@@ -569,10 +571,18 @@ def train_model() -> None:
 
     train_scores = score_dataset(model, data.train_eval_loader, device)
     test_scores = score_dataset(model, data.test_loader, device)
+    if USE_EWAF:
+        train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
     threshold = float(np.mean(train_scores))
 
     y_true = data.test_labels
     split_idx = int(np.sum(y_true == 0))
+    if USE_EWAF:
+        test_scores = apply_ewaf_by_segments(
+            test_scores,
+            EWAF_ALPHA,
+            [split_idx, len(test_scores) - split_idx],
+        )
     y_pred = (test_scores > threshold).astype(int)
     normal_mask = y_true == 0
     fault_mask = y_true == 1

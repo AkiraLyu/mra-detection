@@ -21,12 +21,14 @@ import matplotlib.pyplot as plt
 
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
-from window_utils import build_prompt_test_windows
+from window_utils import apply_ewaf_by_segments, build_prompt_test_windows
 
 
 WINDOW_START_INDEX = 49
 WINDOW_SAMPLE_COUNT = 4000
 TEST_SPLIT_INDEX = 2000
+USE_EWAF = True
+EWAF_ALPHA = 0.15
 
 
 def seed_everything(seed=40):
@@ -226,6 +228,8 @@ def train_model():
 
         recon_train, _, _ = model(x_train_dev)
         train_scores = (recon_train - x_train_dev).pow(2).mean(dim=[1, 2]).cpu().numpy()
+        if USE_EWAF:
+            train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
@@ -235,6 +239,12 @@ def train_model():
         test_scores = (recon_test - x_test_dev).pow(2).mean(dim=[1, 2]).cpu().numpy()
         y_true = test_labels
         split_idx = int(np.sum(y_true == 0))
+        if USE_EWAF:
+            test_scores = apply_ewaf_by_segments(
+                test_scores,
+                EWAF_ALPHA,
+                [split_idx, len(test_scores) - split_idx],
+            )
         y_pred = (test_scores > threshold).astype(int)
 
         print(f"Device: {device}")

@@ -77,3 +77,47 @@ def build_prompt_test_windows_with_mask(
         np.stack(window_masks).astype(mask.dtype, copy=False),
         np.asarray(labels, dtype=np.int64),
     )
+
+
+def apply_ewaf(scores: np.ndarray, alpha: float) -> np.ndarray:
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError(f"ewaf alpha 必须在 (0, 1] 内，收到 {alpha}")
+    if scores.size == 0:
+        return scores.astype(np.float32)
+
+    smoothed = np.empty_like(scores, dtype=np.float32)
+    smoothed[0] = np.float32(scores[0])
+    for idx in range(1, len(scores)):
+        smoothed[idx] = np.float32(
+            alpha * scores[idx] + (1.0 - alpha) * smoothed[idx - 1]
+        )
+    return smoothed
+
+
+def apply_ewaf_by_segments(
+    scores: np.ndarray,
+    alpha: float,
+    segment_lengths: list[int] | None = None,
+) -> np.ndarray:
+    if scores.size == 0:
+        return scores.astype(np.float32)
+    if not segment_lengths:
+        return apply_ewaf(scores, alpha)
+
+    parts = []
+    cursor = 0
+    for length in segment_lengths:
+        if length <= 0:
+            continue
+        next_cursor = min(cursor + length, len(scores))
+        parts.append(apply_ewaf(scores[cursor:next_cursor], alpha))
+        cursor = next_cursor
+        if cursor >= len(scores):
+            break
+
+    if cursor < len(scores):
+        parts.append(apply_ewaf(scores[cursor:], alpha))
+
+    if not parts:
+        return scores.astype(np.float32)
+    return np.concatenate(parts, axis=0).astype(np.float32)

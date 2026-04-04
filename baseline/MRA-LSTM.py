@@ -16,7 +16,11 @@ import warnings
 import os
 import glob
 from pathlib import Path
-from window_utils import TEST_SEGMENT_LENGTH, TEST_WINDOW_COUNT
+from window_utils import (
+    TEST_SEGMENT_LENGTH,
+    TEST_WINDOW_COUNT,
+    apply_ewaf_by_segments,
+)
 warnings.filterwarnings('ignore')
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
@@ -24,6 +28,8 @@ plt.rcParams['font.sans-serif'] = ['SimHei']
 WINDOW_START_INDEX = 49
 WINDOW_SAMPLE_COUNT = 4000
 TEST_SPLIT_INDEX = 2000
+USE_EWAF = True
+EWAF_ALPHA = 0.15
 
 class SequenceDataset(Dataset):
     """Dataset for multirate data.
@@ -565,16 +571,6 @@ def compute_anomaly_scores_train(model, train_loader, device='cpu'):
 
     return np.array(all_errors)
 
-
-def apply_ewaf(errors, alpha=0.3):
-    """Apply Exponentially Weighted Average Filter to smooth errors"""
-    smoothed = np.zeros_like(errors)
-    smoothed[0] = errors[0]
-    for i in range(1, len(errors)):
-        smoothed[i] = alpha * errors[i] + (1 - alpha) * smoothed[i - 1]
-    return smoothed
-
-
 def compute_threshold_static(errors, percentile=95):
     """Compute static threshold based on percentile"""
     return np.percentile(errors, percentile)
@@ -704,6 +700,8 @@ def main():
     # Compute anomaly scores on training data for threshold calculation
     print("\nComputing training anomaly scores for threshold...")
     train_errors = compute_anomaly_scores_train(model, train_loader, device)
+    if USE_EWAF:
+        train_errors = apply_ewaf_by_segments(train_errors, EWAF_ALPHA)
     print(f"Training error stats - mean: {train_errors.mean():.6f}, std: {train_errors.std():.6f}, max: {train_errors.max():.6f}")
 
     threshold_train = float(np.mean(train_errors))
@@ -712,8 +710,14 @@ def main():
     # Compute anomaly scores on test data
     print("\nComputing test anomaly scores...")
     test_errors, labels, predictions, targets = compute_anomaly_scores(model, test_loader, device)
-    print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
     split_idx = int(np.sum(labels == 0))
+    if USE_EWAF:
+        test_errors = apply_ewaf_by_segments(
+            test_errors,
+            EWAF_ALPHA,
+            [split_idx, len(test_errors) - split_idx],
+        )
+    print(f"Test error stats - mean: {test_errors.mean():.6f}, std: {test_errors.std():.6f}, max: {test_errors.max():.6f}")
 
     # Evaluate detection using training-based threshold
     metrics = evaluate_detection(test_errors, labels, threshold_train)
