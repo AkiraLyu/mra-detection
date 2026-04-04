@@ -2,7 +2,6 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import copy
-from pathlib import Path
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 from sklearn.preprocessing import StandardScaler
@@ -29,9 +28,6 @@ from utils.methods.windowing import (
 import random
 
 
-WINDOW_START_INDEX = 99
-WINDOW_SAMPLE_COUNT = None
-TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
 
@@ -190,8 +186,6 @@ def run_full_detection():
         train_mask,
         seq_len=window_size,
         stride=1,
-        start_index=WINDOW_START_INDEX,
-        max_window_count=WINDOW_SAMPLE_COUNT,
     )
     X_test, M_test, test_labels = build_prompt_test_windows(
         test_scaled,

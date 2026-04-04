@@ -1,5 +1,4 @@
 import numpy as np
-from pathlib import Path
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -29,9 +28,6 @@ from utils.methods.windowing import (
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-WINDOW_START_INDEX = 99
-WINDOW_SAMPLE_COUNT = None
-TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
 
@@ -63,8 +59,6 @@ def prepare_data(seq_len=60, stride=1):
         train_data_scaled,
         seq_len=seq_len,
         stride=stride,
-        start_index=WINDOW_START_INDEX,
-        max_window_count=WINDOW_SAMPLE_COUNT,
     )
     X_test, test_labels = build_prompt_test_windows_values(
         test_data_scaled,

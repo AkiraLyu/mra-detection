@@ -27,9 +27,6 @@ plt.rcParams["font.sans-serif"] = ["SimHei"]
 
 
 EPS = 1e-8
-WINDOW_START_INDEX = 99
-WINDOW_SAMPLE_COUNT = None
-TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
 
@@ -128,8 +125,6 @@ def prepare_data(
         train_scaled,
         seq_len=seq_len,
         stride=stride,
-        start_index=WINDOW_START_INDEX,
-        max_window_count=WINDOW_SAMPLE_COUNT,
     )
     x_test, test_labels = build_prompt_test_windows_values(
         test_scaled,

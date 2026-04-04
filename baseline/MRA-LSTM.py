@@ -25,18 +25,11 @@ from utils.methods.postprocess import (
     infer_segment_lengths,
     split_index_from_labels,
 )
-from utils.methods.windowing import (
-    TEST_SEGMENT_LENGTH,
-    TEST_WINDOW_COUNT,
-    build_forecasting_windows,
-)
+from utils.methods.windowing import build_forecasting_windows
 warnings.filterwarnings('ignore')
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-WINDOW_START_INDEX = 99
-WINDOW_SAMPLE_COUNT = None
-TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
 
@@ -60,10 +53,6 @@ class SequenceDataset(Dataset):
             prediction_horizon,
             stride,
             training=training,
-            start_index=WINDOW_START_INDEX,
-            max_window_count=WINDOW_SAMPLE_COUNT,
-            test_segment_length=TEST_SEGMENT_LENGTH,
-            test_window_count=TEST_WINDOW_COUNT,
         )
 
     def __len__(self):

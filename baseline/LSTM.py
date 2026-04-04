@@ -6,8 +6,6 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import MinMaxScaler
 import matplotlib.pyplot as plt
 
-from pathlib import Path
-
 from _project_root import PROJECT_ROOT
 from utils.methods.data_loading import load_csv_dir_values
 from utils.methods.display import (
@@ -28,9 +26,6 @@ from utils.methods.windowing import (
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-WINDOW_START_INDEX = 99
-WINDOW_SAMPLE_COUNT = None
-TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
 
@@ -63,8 +58,6 @@ X_train = build_front_padded_windows(
     train_data_norm,
     SEQ_LENGTH,
     stride=1,
-    start_index=WINDOW_START_INDEX,
-    max_window_count=WINDOW_SAMPLE_COUNT,
 )
 X_test, test_labels = build_prompt_test_windows_values(
     test_data_norm,

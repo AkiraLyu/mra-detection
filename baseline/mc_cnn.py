@@ -54,9 +54,6 @@ from utils.methods.windowing import (
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
 EPS = 1e-6
-WINDOW_START_INDEX = 99
-WINDOW_SAMPLE_COUNT = None
-TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
 
@@ -177,8 +174,6 @@ def prepare_data(
         x_train_mask,
         seq_len=num_channels,
         stride=stride,
-        start_index=WINDOW_START_INDEX,
-        max_window_count=WINDOW_SAMPLE_COUNT,
     )
     dx_test, _, test_labels = build_prompt_test_windows(
         x_test,
@@ -191,8 +186,6 @@ def prepare_data(
         y_train_mask,
         seq_len=num_channels,
         stride=stride,
-        start_index=WINDOW_START_INDEX,
-        max_window_count=WINDOW_SAMPLE_COUNT,
     )
     dy_test, dy_test_mask, _ = build_prompt_test_windows(
         y_test,
