@@ -54,8 +54,8 @@ from utils.methods.windowing import (
 plt.rcParams["font.sans-serif"] = ["SimHei"]
 
 EPS = 1e-6
-WINDOW_START_INDEX = 49
-WINDOW_SAMPLE_COUNT = 4000
+WINDOW_START_INDEX = 99
+WINDOW_SAMPLE_COUNT = None
 TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -518,7 +518,8 @@ def train_model() -> None:
     test_scores = score_dataset(model, data.test_loader, device)
     if USE_EWAF:
         train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
-    threshold = choose_threshold(train_scores, method="mean")
+    # threshold = choose_threshold(train_scores, method="mean")
+    threshold = choose_threshold(train_scores, method="gaussian_quantile_max")
 
     y_true = data.test_labels
     split_idx = split_index_from_labels(y_true)

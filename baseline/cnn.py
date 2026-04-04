@@ -29,8 +29,8 @@ from utils.methods.windowing import (
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-WINDOW_START_INDEX = 49
-WINDOW_SAMPLE_COUNT = 4000
+WINDOW_START_INDEX = 99
+WINDOW_SAMPLE_COUNT = None
 TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -131,7 +131,7 @@ class AnomalyDetectorCNN(nn.Module):
 
 def train_model():
     # 准备数据
-    SEQ_LEN = 60
+    SEQ_LEN = 10
     STRIDE = 1
     X_train, X_test, test_labels, num_features = prepare_data(
         seq_len=SEQ_LEN,
@@ -149,7 +149,7 @@ def train_model():
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # 训练循环
-    epochs = 1
+    epochs = 10
     print(f"开始训练，共 {epochs} 个 Epoch...")
     
     for epoch in range(epochs):
@@ -182,7 +182,8 @@ def train_model():
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
-        threshold = choose_threshold(train_scores, method="mean")
+        # threshold = choose_threshold(train_scores, method="mean")
+        threshold = choose_threshold(train_scores, method="gaussian_quantile_max")
 
         recon_test = model(X_test_dev)
         test_scores = (recon_test - X_test_dev).pow(2).mean(dim=[1, 2]).detach().cpu().numpy()
@@ -213,7 +214,7 @@ def train_model():
             test_scores,
             threshold,
             split_idx,
-            "/home/akira/codespace/mra-detection/outputs/cnn/anomaly_detection_results.png",
+            "/home/akira/codespace/mra-detection/outputs/cnn_detection_results.png",
             title="CNN异常检测",
             ylabel="重构误差",
             show=True,

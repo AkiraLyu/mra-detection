@@ -37,8 +37,8 @@ from utils.methods.windowing import (
 )
 
 
-WINDOW_START_INDEX = 49
-WINDOW_SAMPLE_COUNT = 4000
+WINDOW_START_INDEX = 99
+WINDOW_SAMPLE_COUNT = None
 TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -143,11 +143,11 @@ class AnomalyDetectorTransformer(nn.Module):
 def train_model():
     seed_everything(40)
 
-    seq_len = 60
+    seq_len = 10
     stride = 1
     batch_size = 64
     epochs = 10
-    output_path = Path(__file__).resolve().parent.parent / "outputs" / "transformer_detection.png"
+    output_path = Path(__file__).resolve().parent.parent / "outputs" / "transformer_detection_results.png"
 
     x_train, x_test, test_labels, num_features = prepare_data(
         seq_len=seq_len,
@@ -193,7 +193,8 @@ def train_model():
 
         train_mean = float(np.mean(train_scores))
         train_std = float(np.std(train_scores))
-        threshold = choose_threshold(train_scores, method="mean")
+        # threshold = choose_threshold(train_scores, method="mean")
+        threshold = choose_threshold(train_scores, method="gaussian_quantile_max")
 
         recon_test = model(x_test_dev)
         test_scores = (recon_test - x_test_dev).pow(2).mean(dim=[1, 2]).cpu().numpy()

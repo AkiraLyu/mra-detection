@@ -20,6 +20,7 @@ from .postprocess import (
 )
 from .windowing import (
     TEST_SEGMENT_LENGTH,
+    TEST_SPLIT_INDEX,
     TEST_WINDOW_COUNT,
     build_forecasting_windows,
     build_front_padded_windows,
@@ -32,6 +33,7 @@ from .windowing import (
 
 __all__ = [
     "TEST_SEGMENT_LENGTH",
+    "TEST_SPLIT_INDEX",
     "TEST_WINDOW_COUNT",
     "apply_ewaf",
     "apply_ewaf_by_segments",

@@ -29,8 +29,8 @@ from utils.methods.windowing import (
 import random
 
 
-WINDOW_START_INDEX = 49
-WINDOW_SAMPLE_COUNT = 4000
+WINDOW_START_INDEX = 99
+WINDOW_SAMPLE_COUNT = None
 TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -151,7 +151,6 @@ def run_full_detection():
     DATA_DIR = PROJECT_ROOT / "data"
     TRAIN_PATTERN = "train_*.csv"
     TEST_PATTERN  = "test_*.csv"
-    CKPT_PATH = PROJECT_ROOT / "mstransformer_model.pth"
 
     print("Loading training data...")
     train_data, train_mask, num_features = load_csv_dir_with_mask(
@@ -233,15 +232,13 @@ def run_full_detection():
         lr=1e-3,
         mask_ratio=mask_ratio,
     )
-    torch.save(model.state_dict(), CKPT_PATH)
-    print(f"Best training loss: {best_loss:.6f}")
-    print(f"Model saved to {CKPT_PATH}")
 
     # --- E. 计算训练集异常分数 (用于确定阈值) ---
     train_scores = score_dataset(model, X_train, M_train, device=device, sampling_rate=s_rate, batch_size=batch_size)
     if USE_EWAF:
         train_scores = apply_ewaf_by_segments(train_scores, EWAF_ALPHA)
-    threshold = choose_threshold(train_scores, method="mean_std", std_factor=1.0)
+    # threshold = choose_threshold(train_scores, method="mean_std", std_factor=1.0)
+    threshold = choose_threshold(train_scores, method="gaussian_quantile_max")
 
     print(f"\nTraining Set Score Stats:")
     print(f"  Mean: {np.mean(train_scores):.6f}")
@@ -281,7 +278,7 @@ def run_full_detection():
         test_scores_arr,
         threshold,
         split_idx,
-        PROJECT_ROOT / "anomaly_detection_metrics.png",
+        PROJECT_ROOT / "outputs" /"msformer_detection_results.png",
         title="Multirate Former 异常检测",
         ylabel="重构误差",
         show=True,

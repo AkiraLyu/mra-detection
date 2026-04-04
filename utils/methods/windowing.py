@@ -3,12 +3,77 @@ from __future__ import annotations
 import numpy as np
 
 
-TEST_SEGMENT_LENGTH = 2050
-TEST_WINDOW_COUNT = 2000
+WINDOW_START_INDEX = 99
+TEST_WINDOW_COUNT = 4000
+TEST_SPLIT_INDEX = 2000
+# Backward-compatible alias for older callers; it now represents the split index.
+TEST_SEGMENT_LENGTH = TEST_SPLIT_INDEX
 
 
 def _empty_window_array(data: np.ndarray, seq_len: int) -> np.ndarray:
     return np.zeros((0, seq_len, data.shape[1]), dtype=data.dtype)
+
+
+def _resolve_window_start_index(seq_len: int, start_index: int) -> int:
+    return max(start_index, seq_len - 1)
+
+
+def _resolve_window_end_start(seq_len: int, start_index: int) -> int:
+    return max(start_index + 1, seq_len)
+
+
+def _resolve_training_stop(
+    length: int,
+    start_index: int,
+    stride: int,
+    max_window_count: int | None,
+) -> int:
+    if max_window_count is None:
+        return length
+    return min(length, start_index + max_window_count * stride)
+
+
+def _resolve_eval_stop(
+    length: int,
+    start_end_idx: int,
+    stride: int,
+    window_count: int | None,
+) -> int:
+    if window_count is None:
+        return length + 1
+    return min(length + 1, start_end_idx + window_count * stride)
+
+
+def _resolve_split_index(
+    split_index: int,
+    legacy_segment_length: int | None,
+) -> int:
+    resolved = (
+        legacy_segment_length if legacy_segment_length is not None else split_index
+    )
+    if resolved < 0:
+        raise ValueError(f"split_index 必须 >= 0，收到 {resolved}")
+    return resolved
+
+
+def _build_eval_end_indices(
+    length: int,
+    seq_len: int,
+    stride: int,
+    start_index: int,
+    window_count: int | None,
+) -> range:
+    start_end_idx = _resolve_window_end_start(seq_len, start_index)
+    if length < seq_len or start_end_idx > length:
+        return range(0)
+    stop_idx = _resolve_eval_stop(length, start_end_idx, stride, window_count)
+    return range(start_end_idx, stop_idx, stride)
+
+
+def _build_split_labels(window_count: int, split_index: int) -> np.ndarray:
+    labels = np.zeros((window_count,), dtype=np.int64)
+    labels[min(split_index, window_count) :] = 1
+    return labels
 
 
 def build_windows(
@@ -20,7 +85,6 @@ def build_windows(
     windows = []
     window_masks = []
     num_steps = data.shape[0]
-
     for end_idx in range(0, num_steps, stride):
         start_idx = end_idx - seq_len + 1
         if start_idx >= 0:
@@ -36,7 +100,6 @@ def build_windows(
                 [np.repeat(mask[0:1], pad_len, axis=0), mask[: end_idx + 1]],
                 axis=0,
             )
-
         windows.append(window)
         window_masks.append(window_mask)
 
@@ -48,16 +111,22 @@ def build_standard_windows(
     mask: np.ndarray,
     seq_len: int,
     stride: int = 1,
+    *,
+    start_index: int = WINDOW_START_INDEX,
 ) -> tuple[np.ndarray, np.ndarray]:
-    if len(data) < seq_len:
+    end_indices = _build_eval_end_indices(
+        len(data),
+        seq_len,
+        stride,
+        start_index,
+        window_count=None,
+    )
+    if len(end_indices) == 0:
         shape = (0, seq_len, data.shape[1])
         return np.zeros(shape, dtype=np.float32), np.zeros(shape, dtype=np.float32)
 
-    windows = []
-    window_masks = []
-    for end_idx in range(seq_len, len(data) + 1, stride):
-        windows.append(data[end_idx - seq_len : end_idx])
-        window_masks.append(mask[end_idx - seq_len : end_idx])
+    windows = [data[end_idx - seq_len : end_idx] for end_idx in end_indices]
+    window_masks = [mask[end_idx - seq_len : end_idx] for end_idx in end_indices]
     return np.stack(windows).astype(np.float32), np.stack(window_masks).astype(np.float32)
 
 
@@ -67,38 +136,34 @@ def build_prompt_test_windows(
     seq_len: int,
     stride: int = 1,
     *,
-    segment_length: int = TEST_SEGMENT_LENGTH,
-    window_count: int = TEST_WINDOW_COUNT,
+    start_index: int = WINDOW_START_INDEX,
+    split_index: int = TEST_SPLIT_INDEX,
+    window_count: int | None = TEST_WINDOW_COUNT,
+    segment_length: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    windows = []
-    window_masks = []
-    labels = []
-    stop_idx = min(segment_length, seq_len + window_count)
-
-    for segment_start, label in ((0, 0), (segment_length, 1)):
-        segment_data = data[segment_start : segment_start + segment_length]
-        segment_mask = mask[segment_start : segment_start + segment_length]
-        if len(segment_data) < seq_len:
-            continue
-
-        for end_idx in range(seq_len, stop_idx, stride):
-            if end_idx > len(segment_data):
-                break
-            windows.append(segment_data[end_idx - seq_len : end_idx])
-            window_masks.append(segment_mask[end_idx - seq_len : end_idx])
-            labels.append(label)
-
-    if not windows:
+    end_indices = _build_eval_end_indices(
+        len(data),
+        seq_len,
+        stride,
+        start_index,
+        window_count,
+    )
+    if len(end_indices) == 0:
         return (
             _empty_window_array(data, seq_len).astype(np.float32),
             _empty_window_array(mask, seq_len).astype(np.float32),
             np.zeros((0,), dtype=np.int64),
         )
 
+    split_index = _resolve_split_index(split_index, segment_length)
+    windows = [data[end_idx - seq_len : end_idx] for end_idx in end_indices]
+    window_masks = [mask[end_idx - seq_len : end_idx] for end_idx in end_indices]
+    labels = _build_split_labels(len(end_indices), split_index)
+
     return (
         np.stack(windows).astype(np.float32),
         np.stack(window_masks).astype(np.float32),
-        np.asarray(labels, dtype=np.int64),
+        labels,
     )
 
 
@@ -107,30 +172,26 @@ def build_prompt_test_windows_values(
     seq_len: int,
     stride: int = 1,
     *,
-    segment_length: int = TEST_SEGMENT_LENGTH,
-    window_count: int = TEST_WINDOW_COUNT,
+    start_index: int = WINDOW_START_INDEX,
+    split_index: int = TEST_SPLIT_INDEX,
+    window_count: int | None = TEST_WINDOW_COUNT,
+    segment_length: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    windows = []
-    labels = []
-    stop_idx = min(segment_length, seq_len + window_count)
-
-    for segment_start, label in ((0, 0), (segment_length, 1)):
-        segment_data = data[segment_start : segment_start + segment_length]
-        if len(segment_data) < seq_len:
-            continue
-
-        for end_idx in range(seq_len, stop_idx, stride):
-            if end_idx > len(segment_data):
-                break
-            windows.append(segment_data[end_idx - seq_len : end_idx])
-            labels.append(label)
-
-    if not windows:
+    end_indices = _build_eval_end_indices(
+        len(data),
+        seq_len,
+        stride,
+        start_index,
+        window_count,
+    )
+    if len(end_indices) == 0:
         return _empty_window_array(data, seq_len), np.zeros((0,), dtype=np.int64)
 
-    return np.stack(windows).astype(data.dtype, copy=False), np.asarray(
-        labels, dtype=np.int64
-    )
+    split_index = _resolve_split_index(split_index, segment_length)
+    windows = [data[end_idx - seq_len : end_idx] for end_idx in end_indices]
+    labels = _build_split_labels(len(end_indices), split_index)
+
+    return np.stack(windows).astype(data.dtype, copy=False), labels
 
 
 def build_front_padded_windows(
@@ -138,27 +199,21 @@ def build_front_padded_windows(
     seq_len: int,
     stride: int = 1,
     *,
-    start_index: int = 49,
-    max_window_count: int = 4000,
+    start_index: int = WINDOW_START_INDEX,
+    max_window_count: int | None = None,
 ) -> np.ndarray:
     n = len(data)
     if n == 0:
         return _empty_window_array(data, seq_len)
 
-    stop_idx = min(n, start_index + max_window_count * stride)
-    if stop_idx <= start_index:
+    first_idx = _resolve_window_start_index(seq_len, start_index)
+    stop_idx = _resolve_training_stop(n, first_idx, stride, max_window_count)
+    if stop_idx <= first_idx:
         return _empty_window_array(data, seq_len)
 
     windows = []
-    for idx in range(start_index, stop_idx, stride):
-        if idx < seq_len:
-            pad_len = seq_len - idx - 1
-            window = np.concatenate(
-                [np.tile(data[0:1], (pad_len, 1)), data[0 : idx + 1]],
-                axis=0,
-            )
-        else:
-            window = data[idx - seq_len + 1 : idx + 1]
+    for idx in range(first_idx, stop_idx, stride):
+        window = data[idx - seq_len + 1 : idx + 1]
         windows.append(window)
 
     return np.stack(windows)
@@ -170,35 +225,25 @@ def build_front_padded_windows_with_mask(
     seq_len: int,
     stride: int = 1,
     *,
-    start_index: int = 49,
-    max_window_count: int = 4000,
+    start_index: int = WINDOW_START_INDEX,
+    max_window_count: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     n = len(data)
     if n == 0:
         shape = (0, seq_len, data.shape[1])
         return np.zeros(shape, dtype=data.dtype), np.zeros(shape, dtype=mask.dtype)
 
-    stop_idx = min(n, start_index + max_window_count * stride)
-    if stop_idx <= start_index:
+    first_idx = _resolve_window_start_index(seq_len, start_index)
+    stop_idx = _resolve_training_stop(n, first_idx, stride, max_window_count)
+    if stop_idx <= first_idx:
         shape = (0, seq_len, data.shape[1])
         return np.zeros(shape, dtype=data.dtype), np.zeros(shape, dtype=mask.dtype)
 
     windows = []
     window_masks = []
-    for idx in range(start_index, stop_idx, stride):
-        if idx < seq_len:
-            pad_len = seq_len - idx - 1
-            window = np.concatenate(
-                [np.tile(data[0:1], (pad_len, 1)), data[0 : idx + 1]],
-                axis=0,
-            )
-            window_mask = np.concatenate(
-                [np.tile(mask[0:1], (pad_len, 1)), mask[0 : idx + 1]],
-                axis=0,
-            )
-        else:
-            window = data[idx - seq_len + 1 : idx + 1]
-            window_mask = mask[idx - seq_len + 1 : idx + 1]
+    for idx in range(first_idx, stop_idx, stride):
+        window = data[idx - seq_len + 1 : idx + 1]
+        window_mask = mask[idx - seq_len + 1 : idx + 1]
         windows.append(window)
         window_masks.append(window_mask)
 
@@ -228,10 +273,11 @@ def build_forecasting_windows(
     stride: int = 1,
     *,
     training: bool = True,
-    start_index: int = 49,
-    max_window_count: int = 4000,
-    test_segment_length: int = TEST_SEGMENT_LENGTH,
-    test_window_count: int = TEST_WINDOW_COUNT,
+    start_index: int = WINDOW_START_INDEX,
+    max_window_count: int | None = None,
+    test_split_index: int = TEST_SPLIT_INDEX,
+    test_window_count: int | None = TEST_WINDOW_COUNT,
+    test_segment_length: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     values = data.astype(np.float32)
     x_windows = []
@@ -239,38 +285,37 @@ def build_forecasting_windows(
     labels = []
 
     if training:
-        stop_idx = min(len(values), start_index + max_window_count * stride)
-        for idx in range(start_index, stop_idx, stride):
-            if idx < sequence_length:
-                pad_len = sequence_length - idx - 1
-                window = np.concatenate(
-                    [np.tile(values[0:1], (pad_len, 1)), values[0 : idx + 1]],
-                    axis=0,
-                )
-            else:
-                window = values[idx - sequence_length + 1 : idx + 1]
+        first_idx = _resolve_window_start_index(sequence_length, start_index)
+        stop_idx = _resolve_training_stop(
+            len(values),
+            first_idx,
+            stride,
+            max_window_count,
+        )
+        for idx in range(first_idx, stop_idx, stride):
+            window = values[idx - sequence_length + 1 : idx + 1]
             target = _build_forecast_target(values, idx + 1, prediction_horizon)
             x_windows.append(window)
             y_windows.append(target)
             labels.append(0)
     else:
-        stop_idx = min(test_segment_length, sequence_length + test_window_count)
-        for segment_start, label in ((0, 0), (test_segment_length, 1)):
-            segment_values = values[segment_start : segment_start + test_segment_length]
-            if len(segment_values) < sequence_length:
-                continue
-
-            for end_idx in range(sequence_length, stop_idx, stride):
-                if end_idx > len(segment_values):
-                    break
-                window = segment_values[end_idx - sequence_length : end_idx]
-                global_end_idx = segment_start + end_idx - 1
-                target = _build_forecast_target(
-                    values, global_end_idx + 1, prediction_horizon
-                )
-                x_windows.append(window)
-                y_windows.append(target)
-                labels.append(label)
+        end_indices = _build_eval_end_indices(
+            len(values),
+            sequence_length,
+            stride,
+            start_index,
+            test_window_count,
+        )
+        test_split_index = _resolve_split_index(
+            test_split_index,
+            test_segment_length,
+        )
+        for window_idx, end_idx in enumerate(end_indices):
+            window = values[end_idx - sequence_length : end_idx]
+            target = _build_forecast_target(values, end_idx, prediction_horizon)
+            x_windows.append(window)
+            y_windows.append(target)
+            labels.append(0 if window_idx < test_split_index else 1)
 
     if not x_windows:
         return (

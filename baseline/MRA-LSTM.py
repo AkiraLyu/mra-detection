@@ -34,8 +34,8 @@ warnings.filterwarnings('ignore')
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-WINDOW_START_INDEX = 49
-WINDOW_SAMPLE_COUNT = 4000
+WINDOW_START_INDEX = 99
+WINDOW_SAMPLE_COUNT = None
 TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -654,11 +654,6 @@ def main():
         ylabel='重构误差',
         show=True,
     )
-
-    # Save model
-    model_path = PROJECT_ROOT / 'mra_lstm_model.pth'
-    torch.save(model.state_dict(), model_path)
-    print(f"Model saved to {model_path}")
 
     return model, test_errors, labels, threshold_train
 

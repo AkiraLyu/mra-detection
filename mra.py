@@ -31,16 +31,17 @@ from utils.methods.display import (
     plot_detection_scores,
     save_training_curve,
 )
-from utils.methods.postprocess import apply_ewaf_by_segments, choose_threshold
+from utils.methods.postprocess import (
+    apply_ewaf_by_segments,
+    choose_threshold,
+    infer_segment_lengths,
+    split_index_from_labels,
+)
 from utils.methods.windowing import (
-    TEST_SEGMENT_LENGTH,
-    TEST_WINDOW_COUNT,
     build_prompt_test_windows,
     build_standard_windows,
     build_windows,
 )
-
-TEST_SPLIT_INDEX = 2000
 
 
 @dataclass
@@ -1007,11 +1008,13 @@ def main() -> None:
         disagreement_weight=args.score_disagreement_weight,
         shift_weight=args.score_shift_weight,
     )
+    test_segment_lengths = infer_segment_lengths(test_labels)
+    test_split_idx = split_index_from_labels(test_labels)
     train_scores = apply_ewaf_by_segments(train_raw_scores, args.ewaf_alpha)
     test_scores = apply_ewaf_by_segments(
         test_raw_scores,
         args.ewaf_alpha,
-        segment_lengths=[TEST_WINDOW_COUNT, TEST_WINDOW_COUNT],
+        segment_lengths=test_segment_lengths,
     )
     threshold = choose_threshold(
         train_scores=train_scores,
@@ -1071,7 +1074,7 @@ def main() -> None:
     plot_detection_scores(
         scores=test_scores,
         threshold=threshold,
-        split_idx=TEST_SPLIT_INDEX,
+        split_idx=test_split_idx,
         save_path=output_dir / "anomaly_scores.png",
         title="GCN + 频域门控融合 Transformer 异常检测",
         style="mra",

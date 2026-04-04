@@ -28,8 +28,8 @@ from utils.methods.windowing import (
 
 plt.rcParams['font.sans-serif'] = ['SimHei']
 
-WINDOW_START_INDEX = 49
-WINDOW_SAMPLE_COUNT = 4000
+WINDOW_START_INDEX = 99
+WINDOW_SAMPLE_COUNT = None
 TEST_SPLIT_INDEX = 2000
 USE_EWAF = True
 EWAF_ALPHA = 0.15
@@ -57,7 +57,7 @@ train_data_norm = scaler.fit_transform(train_data_raw)
 test_data_norm = scaler.transform(test_data_raw)
 
 # 创建时间序列窗口
-SEQ_LENGTH = 50
+SEQ_LENGTH = 10
 
 X_train = build_front_padded_windows(
     train_data_norm,
@@ -184,7 +184,8 @@ if USE_EWAF:
     )
 
 # 设定阈值
-threshold = choose_threshold(train_loss_dist, method="mean")
+# threshold = choose_threshold(train_loss_dist, method="mean")
+threshold = choose_threshold(train_loss_dist, method="gaussian_quantile_max")
 
 print(f"\n计算出的异常阈值: {threshold:.6f}")
 
@@ -205,7 +206,7 @@ plot_detection_scores(
     test_loss_dist,
     threshold,
     test_split_idx,
-    "/home/akira/codespace/mra-detection/anomaly_detection_results.png",
+    "/home/akira/codespace/mra-detection/outputs/LSTM_detection_results.png",
     title="LSTM异常检测",
     ylabel="重构误差",
     show=True,
