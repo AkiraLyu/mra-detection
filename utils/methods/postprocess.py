@@ -52,7 +52,7 @@ def choose_threshold(
     *,
     method: str = "mean",
     std_factor: float = 1.0,
-    quantile: float = 0.95,
+    quantile: float = 0.80,
 ) -> float:
     if train_scores.size == 0:
         raise ValueError("train_scores 为空，无法计算阈值。")

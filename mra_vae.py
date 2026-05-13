@@ -968,9 +968,9 @@ def main() -> None:
     )
     threshold = choose_threshold(
         train_scores=train_scores,
-        # method="gaussian_quantile_max",
-        method="mean",
-        std_factor=args.threshold_std_factor,
+        method="gaussian_quantile_max",
+        # method="mean",
+        # std_factor=3,
         quantile=args.threshold_quantile,
     )
     threshold_prediction = (test_scores >= threshold).astype(np.int64)
