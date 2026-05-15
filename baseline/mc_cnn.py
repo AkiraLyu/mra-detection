@@ -554,6 +554,7 @@ def train_model() -> None:
         PROJECT_ROOT / "outputs" / "mc_cnn_detection.png",
         ylabel="异常分数",
         color_scheme="mra",
+        normalize=True,
     )
 
 

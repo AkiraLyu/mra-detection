@@ -229,6 +229,7 @@ def train_model():
             show=True,
             ylabel="重构误差",
             color_scheme="mra",
+            normalize=True,
         )
 
 

@@ -653,6 +653,7 @@ def main():
         ylabel="重构误差",
         color_scheme="mra",
         show=True,
+        normalize=True,
     )
 
     if losses:

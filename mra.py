@@ -1103,6 +1103,7 @@ def main() -> None:
         split_idx=test_split_idx,
         save_path=output_dir / "anomaly_scores.png",
         color_scheme="mra",
+        normalize=True,
     )
 
     print(json.dumps(metrics, ensure_ascii=False, indent=2))

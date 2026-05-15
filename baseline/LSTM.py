@@ -205,4 +205,5 @@ plot_detection_scores(
     ylabel="重构误差",
     color_scheme="mra",
     show=True,
+    normalize=True,
 )

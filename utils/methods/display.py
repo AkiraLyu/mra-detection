@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -48,6 +50,29 @@ _SONGTI_FONT_CANDIDATES = [
     "Source Han Serif SC",
     "DejaVu Serif",
 ]
+
+
+def _normalize_scores_for_display(
+    scores: np.ndarray,
+    threshold: float,
+) -> tuple[np.ndarray, float]:
+    display_scores = np.asarray(scores, dtype=np.float64)
+    finite_values = display_scores[np.isfinite(display_scores)]
+    if np.isfinite(threshold):
+        finite_values = np.concatenate([finite_values, np.asarray([threshold])])
+
+    if finite_values.size == 0:
+        return np.zeros_like(display_scores, dtype=np.float64), 0.0
+
+    value_min = float(np.min(finite_values))
+    value_max = float(np.max(finite_values))
+    value_range = value_max - value_min
+    if value_range <= np.finfo(np.float64).eps:
+        return np.zeros_like(display_scores, dtype=np.float64), 0.0
+
+    normalized_scores = (display_scores - value_min) / value_range
+    normalized_threshold = (float(threshold) - value_min) / value_range
+    return normalized_scores, normalized_threshold
 
 
 def configure_songti_font() -> None:
@@ -164,6 +189,8 @@ def plot_detection_scores(
     score_label: str = "异常分数",
     threshold_label_fmt: str = "阈值",
     split_label: str = "测试集分界",
+    normalize: bool = False,
+    normalized_ylabel: str = "归一化异常分数",
     label_fontsize: float = 14,
     tick_fontsize: float = 12,
     legend_fontsize: float = 15,
@@ -175,19 +202,34 @@ def plot_detection_scores(
     can_show = _can_show_interactive_figure() if show else False
 
     fig, ax = plt.subplots(figsize=figsize)
-    x_axis = np.arange(1, len(scores) + 1)
+    plot_scores, plot_threshold = (
+        _normalize_scores_for_display(scores, threshold)
+        if normalize
+        else (np.asarray(scores), threshold)
+    )
+    plot_ylabel = normalized_ylabel if normalize else ylabel
+    plot_score_label = (
+        normalized_ylabel if normalize and score_label == "异常分数" else score_label
+    )
+    x_axis = np.arange(1, len(plot_scores) + 1)
     mra_score_color = "#0B6E4F"
     mra_threshold_color = "#D1495B"
     mra_split_color = "#222222"
 
     if style == "mra":
-        ax.plot(x_axis, scores, color=mra_score_color, linewidth=1.6, label=score_label)
+        ax.plot(
+            x_axis,
+            plot_scores,
+            color=mra_score_color,
+            linewidth=1.6,
+            label=plot_score_label,
+        )
         ax.axhline(
-            threshold,
+            plot_threshold,
             color=mra_threshold_color,
             linestyle="--",
             linewidth=1.4,
-            label=threshold_label_fmt.format(threshold=threshold),
+            label=threshold_label_fmt.format(threshold=plot_threshold),
         )
         ax.axvline(
             split_idx,
@@ -199,35 +241,35 @@ def plot_detection_scores(
         if split_idx > 0:
             ax.fill_between(
                 x_axis[:split_idx],
-                scores[:split_idx],
+                plot_scores[:split_idx],
                 alpha=0.08,
                 color="#2A9D8F",
             )
-        if split_idx < len(scores):
+        if split_idx < len(plot_scores):
             start = max(split_idx - 1, 0)
             ax.fill_between(
                 x_axis[start:],
-                scores[start:],
+                plot_scores[start:],
                 alpha=0.08,
                 color="#E76F51",
             )
         ax.set_xlabel("窗口索引", fontsize=label_fontsize)
-        ax.set_ylabel("分数", fontsize=label_fontsize)
+        ax.set_ylabel(plot_ylabel if normalize else "分数", fontsize=label_fontsize)
     else:
         use_mra_colors = color_scheme == "mra"
         ax.plot(
-            scores,
+            plot_scores,
             color=mra_score_color if use_mra_colors else None,
             linewidth=1.6 if use_mra_colors else None,
-            label=score_label,
+            label=plot_score_label,
             alpha=0.7,
         )
         ax.axhline(
-            y=threshold,
+            y=plot_threshold,
             color=mra_threshold_color if use_mra_colors else "r",
             linestyle="--",
             linewidth=1.4 if use_mra_colors else None,
-            label=threshold_label_fmt.format(threshold=threshold),
+            label=threshold_label_fmt.format(threshold=plot_threshold),
         )
         ax.axvline(
             x=split_idx,
@@ -237,7 +279,7 @@ def plot_detection_scores(
             label=split_label,
         )
         ax.set_xlabel(xlabel, fontsize=label_fontsize)
-        ax.set_ylabel(ylabel, fontsize=label_fontsize)
+        ax.set_ylabel(plot_ylabel, fontsize=label_fontsize)
 
     if title:
         ax.set_title(title, fontsize=label_fontsize + 1)
