@@ -34,6 +34,7 @@
 
 	% 封面示例————“双学位学士”以外的学位论文
 %	\uestccover[<学院名称排版风格>]{<论文题目>}{<学科专业>}{<学号>}{<作者姓名>}{<指导教师>}{<教师职称>}{<学院>} % 单学位学士、研究生通用
+
 	\uestccover{基于数据插补的电源系统多采样率过程异常检测方法研究}
 	{自动化}
 	{2022060908009}
@@ -42,22 +43,39 @@
 	{高级工程师}
 	{自动化工程学院}  % 空封面
 
+%	\uestccover{基于数据插补的电源系统多采样率过程异常检测方法研究}
+%	{自动化}
+%	{2022060908009}
+%	{XXX}
+%	{XXX}
+%	{XXX}
+%	{自动化工程学院}  % 空封面
 
 	% 开启中文摘要
 	\zhabstract
 
-	随着智能制造的推进，现代工业系统逐渐变得大型化、复杂化，典型流程工业装置如电源系统中集成了大量不同传感器，其状态变量的采样频率各不相同，统一到同一时间轴后会产生大量结构性缺失值和时间异步现象，给异常检测任务带来较大困难。鉴于大功率供能系统在各工业领域发挥着重大作用，及时对其运行状态进行检测、避免发生严重故障具有重大研究意义。
+	随着智能制造的推进，现代工业系统逐渐变得大型化、复杂化，典型工业装置如电源系统集成了大量不同采样率的传感器，统一时间轴后会产生大量结构性缺失值，给异常检测任务带来较大困难。鉴于大功率供能系统在各工业领域发挥着重大作用，及时对其运行状态进行检测、避免发生严重故障具有重要研究意义。逆变器系统是电源系统的关键功率单位，若长期工作在高负载工况下，其内部功率开关、滤波电容、电感等易发生故障，鉴于其状态监测数据多采样率的特点，有必要提出针对性的异常检测方法实现精准监测。然而针对多采样率场景，现有方法大多通过简单插值、降采样或直接忽略缺失值来处理，无法兼顾变量间耦合关系、周期频谱特征与全局时序演化规律。为解决该问题，本文首先构建基于变分自编码器与Transformer的VAE-Former（Variational Auto-Encoder Transformer）验证模型，并进一步提出一种面向多采样率电源系统的自适应图--频率异常检测网络（Adaptive Graph-Frequency Anomaly Detection Network, AGF-ADNet）。
 
-    逆变器系统是电源系统的关键功率单位，其可靠性为系统的稳定运行提供保障，然而若长期工作在高负载工况下，其内部功率开关、滤波电容、电感等易发生故障，鉴于其状态监测数据呈现多采样率的特点，有必要提出针对多采样率的异常检测方法实现逆变器系统的精准监测。然而针对采样率场景，现有方法大多通过简单插值、降采样或直接忽略缺失值来处理，无法兼顾变量间耦合关系、周期频谱特征与全局时序演化规律的联合建模。为解决该问题，本文提出一种面向多采样率电源系统的自适应图--频率异常检测网络（Adaptive Graph-Frequency Anomaly Detection Network, AGF-ADNet）。该模型引入双向预插补与自监督再遮挡机制，为缺失恢复提供稳定的初始化条件和可靠的监督信号；在插补阶段，构建双专家协同插补模块，其中自适应图重构专家通过动态图学习与图卷积传播挖掘变量间隐式关联，频域重构专家借助快速傅里叶变换与频率注意力增强周期性与谐波信息，再经采样率感知门控融合模块生成最终插补结果；在检测阶段，应用采样率感知 Transformer 全局重构检测器，将变量身份、采样率类别与采样相位编码到统一表示中，联合重构偏差、双专家分歧和分布漂移三类信号构建异常评分，实现插补与检测的协同优化。在三相全桥逆变系统实验平台数据集上的验证结果表明，AGF-ADNet 在测试集上取得了 99.10\% 的准确率、100.00\% 的精确率、98.20\% 的召回率和 99.10\% 的 F1-Score，误报率为 0，优于 CNN、LSTM、VAE、Transformer、MRA-LSTM、Multirate Former和 MR-FA 等对比方法。实验结果验证了本文方法能够缓解多采样率场景下的结构性缺失问题，提升电源系统异常检测的准确性与鲁棒性。
+    （1）针对多采样率对齐后结构性缺失破坏时序连续性、现有插补方法局部平滑易受局部误差影响并干扰后续异常判别的问题，设计 VAE-Former 验证模型，通过潜变量建模隐藏状态，以应对多采样率导致的结构性缺失，利用掩码感知变分自编码器完成缺失值补全，再通过采样率感知 Transformer 进行全局重构检测，以验证先插补后检测范式在多采样率异常检测中的可行性。
+
+    （2）针对现有方法难以在结构性缺失条件下联合刻画变量耦合关系、周期频谱特征与全局时序演化规律的问题，提出 AGF-ADNet 模型，在插补阶段，构建双专家协同插补模块，其中自适应图重构专家通过动态图学习与图卷积传播挖掘变量间隐式关联，频域重构专家借助傅里叶变换与频率注意力增强周期性与谐波信息，经采样率感知门控融合模块生成最终插补结果；检测阶段应用采样率感知 Transformer 重构检测器编码采样率信息，联合重构偏差、双专家分歧和分布漂移构建异常评分，实现插补与检测的协同优化。
+
+    在三相全桥逆变系统多采样率测试集上，VAE-Former 取得91.65\%的准确率，证明了显式插补的有效性；AGF-ADNet 进一步取得 99.10\% 的准确率，较本实验中表现最优的对比方法提升12.18\%。实验结果表明，本文方法能够在当前数据条件下缓解多采样率场景中的结构性缺失问题，并提升电源系统异常检测的准确性。
 
 	% 中文关键字
-	\zhkeywords{异常检测，多采样率过程，数据插补，图卷积网络，频域注意力，电源系统}
+	\zhkeywords{异常检测，多采样率，数据插补，图卷积网络，频域注意力，电源系统}
 
 	% 开启英文摘要
 	\enabstract
-	With the advancement of intelligent manufacturing, modern industrial systems are becoming increasingly large-scale and complex. Typical process-industry installations such as power systems integrate a large number of heterogeneous sensors whose state variables are sampled at different frequencies. After alignment onto a unified timeline, large amounts of structured missing values and temporal asynchrony are introduced, which pose significant challenges to anomaly detection. Since high-power energy supply systems play a vital role across industrial sectors, timely condition monitoring and the prevention of severe faults are of great research significance.
+	With the advancement of intelligent manufacturing, modern industrial systems have gradually become larger and more complex. Typical industrial devices such as power systems integrate a large number of sensors with different sampling rates. After these variables are aligned onto a unified time axis, a large number of structured missing values are generated, bringing considerable difficulties to anomaly detection tasks. Since high-power energy supply systems play an important role in various industrial fields, timely detection of their operating states and prevention of serious faults are of great research significance.
 
-	As a key power unit in a power system, the inverter system is essential for stable system operation. However, when operating under high-load conditions for long periods, internal components such as power switches, filter capacitors, and inductors are prone to faults. Because its condition-monitoring data exhibit multi-rate characteristics, it is necessary to develop anomaly detection methods specifically for multi-rate scenarios to achieve accurate monitoring of inverter systems. Existing methods for multi-rate data usually rely on simple interpolation, down-sampling, or direct omission of missing values, and thus cannot jointly model variable coupling relationships, periodic spectral characteristics, and global temporal evolution patterns. To address this issue, this thesis proposes an Adaptive Graph-Frequency Anomaly Detection Network (AGF-ADNet) for multi-rate power systems. The model introduces a bidirectional pre-imputation strategy and a self-supervised remasking mechanism to provide stable initialization and reliable supervision for missing-value recovery. During the imputation stage, a dual-expert collaborative imputation module is constructed, in which an adaptive graph reconstruction expert exploits dynamic graph learning and graph convolutional propagation to mine implicit inter-variable correlations, while a frequency-domain reconstruction expert leverages fast Fourier transform and frequency attention to enhance periodic and harmonic information. A rate-aware gating fusion module is then employed to generate the final imputation results. During the detection stage, a rate-aware Transformer-based global reconstruction detector encodes variable identity, sampling-rate category, and sampling phase into a unified representation, and integrates reconstruction deviation, expert disagreement, and distribution shift to construct anomaly scores, enabling collaborative optimization of imputation and detection. Experimental results on a dataset collected from a three-phase full-bridge inverter experimental platform show that AGF-ADNet achieves 99.10\% accuracy, 100.00\% precision, 98.20\% recall, and 99.10\% F1-score, with a false alarm rate of 0 on the test set, outperforming CNN, LSTM, VAE, Transformer, MRA-LSTM, Multirate Former, and MR-FA. These results verify that the proposed method can alleviate the structured missingness problem in multi-rate scenarios and improve the accuracy and robustness of anomaly detection for power systems.
+	The inverter system is a key power unit in power systems. If it works under high-load conditions for a long time, its internal power switches, filter capacitors, inductors, and other components are prone to faults. Considering the multi-rate characteristics of its condition monitoring data, it is necessary to propose targeted anomaly detection methods to achieve accurate monitoring. However, for multi-rate scenarios, most existing methods rely on simple interpolation, down-sampling, or direct omission of missing values, and cannot take into account inter-variable coupling relationships, periodic spectral features, and global temporal evolution patterns simultaneously. To solve this problem, this thesis first constructs a VAE-Former (Variational Auto-Encoder Transformer) validation model, and further proposes an Adaptive Graph-Frequency Anomaly Detection Network (AGF-ADNet) for multi-rate power systems.
+
+	(1) To address the problem that structured missing values after multi-rate alignment destroy temporal continuity, while existing imputation methods based on local smoothing are easily affected by local errors and interfere with subsequent anomaly discrimination, a VAE-Former validation model is designed. The model uses latent variables to model hidden states so as to handle the structured missing values caused by multi-rate sampling. It completes missing-value imputation through a mask-aware variational autoencoder, and then performs global reconstruction detection through a rate-aware Transformer, thereby verifying the feasibility of the imputation-before-detection paradigm in multi-rate anomaly detection.
+
+	(2) To address the problem that existing methods have difficulty jointly characterizing inter-variable coupling relationships, periodic spectral features, and global temporal evolution patterns under structured missing conditions, the AGF-ADNet model is proposed. In the imputation stage, a dual-expert collaborative imputation module is constructed. The adaptive graph reconstruction expert mines implicit inter-variable associations through dynamic graph learning and graph convolutional propagation, while the frequency-domain reconstruction expert enhances periodic and harmonic information with the aid of Fourier transform and frequency attention. The final imputation results are generated through a rate-aware gated fusion module. In the detection stage, a rate-aware Transformer reconstruction detector is applied to encode sampling-rate information, and anomaly scores are constructed by combining reconstruction deviation, dual-expert disagreement, and distribution drift, thereby realizing the collaborative optimization of imputation and detection.
+
+	Under the multi-rate test set and evaluation protocol constructed from a three-phase full-bridge inverter experimental platform in this thesis, VAE-Former achieves an accuracy of 91.65\% on the test set, demonstrating the effectiveness of explicit imputation. AGF-ADNet further achieves an accuracy of 99.10\%, improving by 12.18 percentage points over the best-performing comparison method in this experiment. These results indicate that the proposed method can alleviate the structured missing-value problem under the current data conditions and improve the accuracy and robustness of anomaly detection in power systems.
 
 	% 英文关键字
 	\enkeywords{Anomaly Detection, Multi-rate Process, Data Imputation, Graph Convolutional Network, Frequency-domain Attention, Power System}
@@ -77,21 +95,23 @@
 
     随着工业4.0和智能制造的不断推进，现代工业系统正朝着大型化、复杂化和智能化方向发展\citess{JAVAID2023100001,article,2023MeasS..2800822R}。电源系统、逆变器系统以及典型流程工业装置中集成了大量传感器、执行器与控制单元，系统内部存在电磁、热力、机械和控制等多重耦合关系\citess{article1,LIU2023121075}，运行过程呈现出动态性、非线性和不确定性特征\citess{10.1016/j.eswa.2023.121024}。一旦关键设备退化、控制偏差累积\citess{https://doi.org/10.1049/stg2.70024}或外部工况突变而未被及时识别，就可能引发局部失稳、连锁故障甚至停机事故\citess{KHAN202133,info14100540,article2,Yu_2021}，造成设备损坏、产品质量下降和经济损失。面向复杂工业过程开展可靠的异常检测研究，无论在理论上还是工程上都具有重要意义\citess{tayeh2021anomaly,app11073186}。
 
-    电源系统及其相关工业场景中的异常往往涉及运行过程中往往涉及化学能、电能与热能之间的复杂转换关系\citess{electronics13153083}以及电压、电流、功率、温度等多类变量的协同变化，既可能体现为瞬态尖峰、缓慢漂移，也可能表现为谐波畸变、频率偏移和波形失真等复杂模式。相比一般静态监测任务，这类系统的异常形态更为多样，单纯依靠人工巡检或固定阈值规则已难以满足实时监测和早期预警的需求。近年来，随着工业现场运行数据的持续积累，数据驱动方法为异常检测提供了新的研究路径。通过挖掘多变量时间序列中的演化规律与变量间的关联结构，即使缺乏完备的机理模型，也能够在一定程度上识别设备健康状态和过程异常。
+    电源系统中的逆变器承担直流电与交流电之间的能量变换任务，是连接电源、负载和控制系统的关键功率单元。以三相全桥逆变器为例，绝缘栅双极型晶体管（Insulated Gate Bipolar Transistor, IGBT）通常作为核心功率开关器件，其兼具较高电压耐受能力、较大载流能力和较快开关速度，因而被广泛用于现代工业、交通运输和电力系统等场景\citess{20241,fei_liu_design_2009}。但在长期高负载、高温、高压、频繁开断以及过流、过压冲击条件下，IGBT 及其外围滤波电感、电容、驱动和连接结构可能出现热失效、电气失效、机械应力失效或封装退化等问题\citess{20241}。这些物理退化会进一步反映到电压、电流、功率、频率、谐波和温度等状态变量中，形成突变、漂移、振荡增强、频谱畸变或波形失真等可观测异常。
+
+    因此，电源系统及其相关工业场景中的异常并非单一统计离群点，而是电磁、热力、机械和控制过程耦合后的综合表现。相比一般静态监测任务，这类系统的异常形态更为多样，单纯依靠人工巡检或固定阈值规则已难以满足实时监测和早期预警的需求。近年来，随着工业现场运行数据的持续积累，数据驱动方法为异常检测提供了新的研究路径。通过挖掘多变量时间序列中的演化规律与变量间的关联结构，即使缺乏完备的机理模型，也能够在一定程度上识别设备健康状态和过程异常。
 
     然而，真实工业数据通常并非理想的单采样率序列。大型系统中往往部署了多类型传感器网络，可以同时采集量纲不同、数值差异较大的各类状态参量。由于传感器成本、测量原理、通信带宽和变量动态特性存在差异，不同变量通常以不同频率采集。例如，电流、电压等电气量一般以较高频率采样，而温度、状态量或质量指标则以较低频率更新。将这些不同采样率的数据统一对齐到同一时间轴后，会产生大量规则性缺失值和时间异步现象，形成多采样率时间序列。这种特性一方面削弱了数据完整性，另一方面增加了建模难度——直接套用单采样率异常检测方法难以充分利用低频变量信息，还可能因缺失值传播、插补失真和时序错位而降低检测精度。
 
     基于上述背景，围绕多采样率工业过程数据开展异常检测研究，尤其是探索数据插补与异常检测协同优化的建模思路，兼具理论和工程两方面意义。在理论上，相关研究有助于深化对多采样率时间序列表示、缺失信息恢复以及异常模式判别机制的认识，丰富工业过程监测与智能诊断的方法体系。在工程上，通过软件建模手段提升对低频变量和隐性异常的感知能力，可以在一定程度上降低对高成本高频传感器的依赖，为电源系统及相关工业场景的安全运行、故障预警和运维决策提供支撑。
 
-	\section{异常检测方法研究进展}
+	\section{单采样率异常检测方法研究现状}
 
-	\subsection{传统统计与机器学习方法}
+	\subsection{基于统计与机器学习的单采样率异常检测研究现状}
 
     异常检测的早期研究主要基于统计学建模、距离与密度度量、聚类分析以及支持向量机等方法。统计学方法通过假设数据服从特定分布\citess{2010EnvMS..25.1014H}并设置判别阈值来识别异常\citess{doi:10.1137/S0036144500371907}，实现简单且计算开销较低；基于距离、密度和聚类的方法利用样本间相似性关系识别离群行为\citess{e71595caf5ab496585138be92401f5e8,KUMPULAINEN20083840,10.1145/331499.331504,2007ITKDE..19..345G,Muniyandi2012NetworkAD}；单类支持向量机等判别式方法在缺乏异常样本时也有一定适用性\citess{HIMEUR2021116601}。这些方法在结构较简单、维度较低且分布相对稳定的场景中取得了较好的效果。
 
     但面对复杂工业过程，传统方法的局限性较为明显。多数方法依赖显式分布假设或人工设计特征\citess{Davis2011DataPF}，当系统呈现强非线性、强耦合和时变特性时，模型鲁棒性往往不足。此外，在高维多变量场景下，距离和密度度量的判别能力会受到维度影响，聚类效果对参数和特征选择也比较敏感\citess{SURESH2024112369,DU2024121161}。传统方法还难以刻画长时间跨度内的动态依赖关系，对复杂异常模式和多类型故障的适应能力有限\citess{Rezaei2021ANS}。随着工业数据规模和复杂度不断提升，仅依靠传统方法已难以满足高精度和实时异常检测的需求。
 
-	\subsection{深度学习异常检测方法}
+	\subsection{基于深度学习的单采样率异常检测研究现状}
 
     深度学习方法能够通过端到端训练自动提取时序特征，在高维、非线性和强噪声场景中具有较强的建模能力，已成为异常检测领域的重要研究方向。现有研究大体分为两类：一类是基于预测的方法，利用历史序列预测未来观测值，将预测误差作为异常判据；另一类是基于重构的方法，通过自编码器、变分自编码器或 Transformer 等模型学习正常样本的潜在表示，再根据重构误差识别异常。
 
@@ -99,17 +119,17 @@
 
     尽管如此，现有深度学习异常检测方法仍存在不足。多数方法默认所有变量具有统一采样率\citess{hu2021lstm}，对多采样率场景下的规则性缺失和时间异步问题考虑不足；很多模型主要聚焦时间维度建模，对变量间耦合关系和频域信息的利用仍不充分；此外，异常阈值的设定、噪声干扰的抑制以及模型可解释性等问题在实际部署中也仍然突出。
 
-	\section{多采样率时间序列建模研究现状}
+	\section{多采样率异常检测研究现状}
 
     受限于传感器部署成本、测量技术条件以及物理变量本身的动态特性差异，工业过程所采集的数据普遍呈现出多采样率的显著特征\citess{Wen2025AMF,proceedings2130781,2024PatRe.14509943C}，其核心特征在于数据中包含大量因采样频率差异而产生的缺失值\citess{YANG2023109410}。随着智能制造和工业物联网（Industrial Internet of Things, IIoT）的发展，越来越多的设备配备了不同类型的传感器，用于采集实时运行状态和性能数据。这些传感器的差异不仅体现在硬件类型上，也反映在各自的采样频率上，由此导致统一对齐后的数据集——尤其是低频采样变量——不可避免地包含大量缺失值。这些缺失值直接影响数据的完整性和一致性，使得后续分析和建模工作更加复杂\citess{YUAN202011883}。在故障检测任务中，缺失值可能掩盖潜在的故障信号或干扰模型的学习过程，降低检测的准确性和可靠性。同时，不同变量之间既存在时序相关性，又存在空间与功能层面的耦合关系，给多采样率数据的建模带来了较大挑战。如何在多采样率环境下合理处理缺失值，是当前故障检测算法研究中的一个重要问题。现有方法大致可归纳为三类：降采样法、直接建模方法和数据插补方法。
 
-    \subsection{降采样方法}
+    \subsection{基于降采样的多采样率异常检测研究现状}
 
     降采样方法将数据按照统一的采样频率重新排列，通过丢弃部分数据将高频采样变量降至与低频采样变量相同的采样率。
 
-    这类方法往往无法适应多采样率环境下的数据特点，可能导致高频变量中的重要动态信息丢失，降低模型对快速变化过程的感知能力，同时引入人为噪声，破坏数据原有的时间依赖结构\citess{Huang2025AttentionBasedMN}。Lu 等人（2024）指出，将多采样率多变量时间序列（Multirate Multivariate Time Series, MR-MTS）强制转换为统一采样率的序列，容易导致信息丢失或结构失真\citess{10313305,LuWS24}。因此，研究者正在探索能够兼顾缺失值填补与采样频率差异的处理方案，以更充分地利用多采样率数据提升故障检测性能。
+    这类方法往往无法适应多采样率环境下的数据特点，可能导致高频变量中的重要动态信息丢失，降低模型对快速变化过程的感知能力，同时引入人为噪声，破坏数据原有的时间依赖结构\citess{Huang2025AttentionBasedMN}。Lu 等人（2024）指出，将多采样率多变量时间序列（Multirate Multivariate Time Series, MR-MTS）强制转换为统一采样率的序列，容易导致信息丢失或结构失真\citess{liu_multirate-former_2024,lu_unmanned_2024}。因此，研究者正在探索能够兼顾缺失值填补与采样频率差异的处理方案，以更充分地利用多采样率数据提升故障检测性能。
 
-    \subsection{直接建模方法}
+    \subsection{基于直接建模的多采样率异常检测研究现状}
 
     另一类研究致力于设计端到端模型，直接对多采样率数据进行建模，以避免显式插补带来的误差积累。Lu 等人（2024）提出的多采样率感知长短期记忆网络（Multirate-Aware LSTM, MRA-LSTM）是该方向的代表性工作\citess{lu_unmanned_2024}。
 
@@ -117,11 +137,11 @@
 
     MRA-LSTM 的研究表明了多尺度特征融合的重要性，对后续设计基于插补的异常检测模型具有参考价值。但该方法在处理缺失值时存在不足：其策略是直接忽略缺失值，未对缺失数据进行合理的补全。这种处理方式可能导致数据中的潜在模式和关键信息被丢弃，限制了模型对样本演变规律的学习效果。
 
-    Song 等人提出了多时序通道卷积神经网络（Multitemporal Channels Convolutional Neural Network, MC-CNN）\citess{song_soft_2025}，利用改进的反向传播（Back Propagation, BP）算法处理带有缺失值的输入序列，然后通过卷积神经网络进行局部特征提取，再经全连接层映射。MC-CNN 在局部特征提取方面取得了一定成果，但与 MRA-LSTM 类似，其对缺失值仍采用简单的忽略策略，可能导致潜在关键信息的丢失，影响预测精度和泛化能力。Zhou 等人提出了多采样率因子分析模型（MR-FA）\citess{zhou_multirate_2019}。MR-FA 假设所有不同采样率的测量值都共享同一组公共潜在因子 $t(k)$，通过这些因子来界定和约束变量间的互相关性，其核心仍基于静态因子分析 ，对于具有显著动态时域特性的工业过程（如具有时滞或动态演化特征的系统），其捕捉变量间时序动态信息的能力尚存在提升空间。
+    Song 等人提出了多时序通道卷积神经网络（Multitemporal Channels Convolutional Neural Network, MC-CNN）\citess{song_soft_2025}，利用改进的反向传播（Back Propagation, BP）算法处理带有缺失值的输入序列，然后通过卷积神经网络进行局部特征提取，再经全连接层映射。MC-CNN 在局部特征提取方面取得了一定成果，但与 MRA-LSTM 类似，其对缺失值仍采用简单的忽略策略，可能导致潜在关键信息的丢失，影响预测精度和泛化能力。Zhou 等人提出了多采样率因子分析模型（MR-FA）\citess{zhou_multirate_2019}。MR-FA 假设所有不同采样率的测量值都共享同一组公共潜在因子 $t(k)$，通过这些因子来界定和约束变量间的互相关性，其核心仍基于静态因子分析，对于具有显著动态时域特性的工业过程（如具有时滞或动态演化特征的系统），其捕捉变量间时序动态信息的能力尚存在提升空间。
 
     综合来看，尽管已有多采样率直接建模方法在一定程度上缓解了采样频率差异带来的问题，但在数据缺失和信息不完整的场景下仍面临挑战。简单的忽略策略难以利用缺失位置所蕴含的时序关联信息，缺失值若不经合理的插补处理，可能导致潜在模式丢失，影响模型的故障检测能力。
 
-    \subsection{数据插补方法}
+    \subsection{基于数据插补的多采样率异常检测研究现状}
 
     基于数据插补的方法首先将所有变量按照最高采样率在时间轴上对齐，然后通过建模方法填补缺失点以得到完整数据集，最后在此基础上进行异常检测。
 
@@ -289,19 +309,21 @@
     本文将 Transformer 作为全局重构模块使用，目的是在完成局部时序特征提取和频域增强后，进一步建模整个时间窗口范围内的长程依赖关系。与图卷积和 TCN 相比，Transformer 更擅长捕捉跨越较长时间跨度的整体演化规律，因此能够为异常评分提供更高质量的重构结果。
 
 	\section{本文研究定位}
-	基于现有研究基础，本文围绕电源系统多采样率异常检测问题，针对插补不可靠、变量耦合建模不足及周期性异常感知能力弱等核心问题，。首先设计 VAE-Transformer 验证传统方法的插补和检测能力，用掩码感知 VAE 完成缺失值补全，再利用采样率感知 Transformer 进行全局重构检测。在此基础上，进一步提出融合自适应图结构与频域注意力机制的端到端异常检测模型 AGF-ADNet，通过图学习、频域特征增强和门控融合提升模型对变量耦合关系、周期频谱信息和全局时序演化规律的表达能力。
+	基于现有研究基础，本文围绕电源系统多采样率异常检测问题，针对插补不可靠、变量耦合建模不足及周期性异常感知能力弱等核心问题，首先设计 VAE-Former 验证传统方法的插补和检测能力，用掩码感知 VAE 完成缺失值补全，再利用采样率感知 Transformer 进行全局重构检测。在此基础上，进一步提出融合自适应图结构与频域注意力机制的端到端异常检测模型 AGF-ADNet，通过图学习、频域特征增强和门控融合提升模型对变量耦合关系、周期频谱信息和全局时序演化规律的表达能力。
     \section{论文结构安排}
     除本章外，全文其余部分拟安排如下：
     \begin{itemize}
-        \item 第二章介绍两类方法共享的多采样率数据表示、样本构造、采样率感知重构检测器和判别流程，并在此基础上阐述 VAE-Transformer 验证模型。
+        \item 第二章介绍两类方法共享的多采样率数据表示、样本构造、采样率感知重构检测器和判别流程，并在此基础上阐述 VAE-Former 验证模型。
         \item 第三章详细阐述 AGF-ADNet 模型，包括自适应图结构学习、时频双分支插补、采样率感知门控融合以及多源异常评分方法。
         \item 第四章利用三相全桥逆变系统实验平台进行验证，给出实验设计、评价指标与对比方法，并对模型在典型多采样率工业过程数据上的检测结果进行分析，验证所提方法的有效性。
         \item 第五章对全文工作进行总结，归纳研究结论，并结合当前方法的局限性展望后续改进方向。
     \end{itemize}
 
-    \chapter{通用建模框架与VAE-Transformer模型设计}
+    \chapter{基于VAE-Former的多采样率异常检测方法研究}
 
-    \section{通用问题定义与建模流程}
+    本章面向多采样率电源系统异常检测任务，首先给出两类方法共享的问题定义、数据处理流程和异常判别框架，再在此基础上构建 VAE-Former 验证模型。该章的重点不在于追求最终最优性能，而是验证基于数据结构进行缺失插补--全局重构--异常评分这一基本路线在多采样率数据条件下是否可行，为后续 AGF-ADNet 的结构增强提供依据。
+
+    \section{问题定义}
 
     面向电源系统多采样率异常检测任务，设原始监测序列记为
     \begin{equation}
@@ -327,16 +349,18 @@
     \end{equation}
     其中 $B$ 为批大小。在当前实验设置中，窗口长度取 $L=50$，变量总数为 $N=18$。根据各变量观测频率差异，可进一步将变量划分为若干采样率组，并为每个变量赋予采样率类别标识 $r_n$ 与采样步长 $s_n$。
 
-    VAE-Transformer 与 AGF-ADNet 均采用先进行缺失插补，再全局重构，最后异常判别的基本范式。设训练或推理阶段模型实际看到的缺失掩码为 $\widetilde{\mathbf{M}}$，则两类方法的共享流程可概括为
+    VAE-Former 与 AGF-ADNet 均采用先进行缺失插补，再全局重构，最后异常判别的基本范式。设训练或推理阶段模型实际看到的缺失掩码为 $\widetilde{\mathbf{M}}$，则两类方法的共享流程可概括为
     \begin{align}
         \mathbf{X}^{\mathrm{in}} &= \mathbf{X} \odot (1-\widetilde{\mathbf{M}}), \\
         \mathbf{X}^{\mathrm{imp}} &= \mathcal{I}_{\theta}\!\left(\mathbf{X}^{\mathrm{in}},\widetilde{\mathbf{M}},\mathbf{r},\mathbf{s}\right), \\
         \mathbf{X}^{\mathrm{comp}} &= \mathbf{X}^{\mathrm{in}} + \widetilde{\mathbf{M}} \odot \mathbf{X}^{\mathrm{imp}}, \\
         \hat{\mathbf{X}} &= \mathcal{D}_{\phi}\!\left(\mathbf{X}^{\mathrm{comp}},\mathbf{O},\mathbf{r},\mathbf{s}\right).
     \end{align}
-    其中，$\mathcal{I}_{\theta}(\cdot)$ 表示插补器，$\mathbf{X}^{\mathrm{comp}}$ 表示由观测值与插补值共同构成的完整窗口，$\mathcal{D}_{\phi}(\cdot)$ 表示采样率感知 Transformer 重构检测器。VAE-Transformer 使用掩码感知 VAE 作为插补器，用于验证该范式的基本可行性；AGF-ADNet 则将插补器替换为图结构专家与频域专家的门控融合模块，以提升对变量耦合和周期特征的表达能力。
+    其中，$\mathcal{I}_{\theta}(\cdot)$ 表示插补器，$\mathbf{X}^{\mathrm{comp}}$ 表示由观测值与插补值共同构成的完整窗口，$\mathcal{D}_{\phi}(\cdot)$ 表示采样率感知 Transformer 重构检测器。VAE-Former 使用掩码感知 VAE 作为插补器，用于验证该范式的基本可行性；AGF-ADNet 则将插补器替换为图结构专家与频域专家的门控融合模块，以提升对变量耦合和周期特征的表达能力。
 
-    \section{通用数据处理与样本构造}
+    需要说明的是，本文最终输出正常与异常两类判别结果，但方法设定并非依赖正常样本和故障样本共同训练的普通监督二分类。训练阶段主要利用正常工况样本学习系统在健康状态下的重构规律，并依据训练或验证样本的异常分数分布确定检测阈值；测试阶段再根据样本相对正常模式的偏离程度给出异常分数和二值告警。测试集标签仅用于计算评价指标，不参与模型参数学习。因此，本文所述主要是评价层面的正常/异常判别形式，本质上仍属于基于正常数据建模的异常检测任务。
+
+    \section{数据处理与样本构造}
 
     \subsection{缺失掩码生成与观测值标准化}
 
@@ -376,7 +400,7 @@
 
     通过这种方式构建并输入模型的一个窗口如图\ref{fig:windowing}所示。
 
-    \begin{figure}[!h]
+    \begin{figure}[!htbp]
         \centering
         \includegraphics[width=0.4\linewidth]{窗口.pdf}
         \caption{时间窗口}
@@ -395,16 +419,17 @@
     \begin{equation}
         s_n = \operatorname{round}\!\left(\frac{1}{\max(\rho_n,\varepsilon)}\right).
     \end{equation}
-    根据不同步长的取值，可进一步映射为离散采样率类别标识 $r_n$。该元数据在 VAE-Transformer 与 AGF-ADNet 的 Transformer 编码中共同发挥作用；在 AGF-ADNet 中，还进一步用于门控融合模块。
+    根据不同步长的取值，可进一步映射为离散采样率类别标识 $r_n$。该元数据在 VAE-Former 与 AGF-ADNet 的 Transformer 编码中共同发挥作用；在 AGF-ADNet 中，还进一步用于门控融合模块。
 
-    同时，基于上述推断得到的采样率组，可以对数据进行分块（chunking），并将相似采样率组的数据排列在一起，相似采样率的变量通常具有较强的相关性，可以使模型更稳定地利用同采样层级变量之间的相关信息。数据分块示意如图\ref{fig:data_chunking}所示。其中红色代表缺失样本。
-
+    同时，基于上述推断得到的采样率组，可以对数据进行分块（chunking）。    
     \begin{figure}[!htbp]
         \centering
         \includegraphics[width=\linewidth]{chunking.drawio.pdf}
         \caption{数据分块示意图}
         \label{fig:data_chunking}
     \end{figure}
+
+    该步骤将相似采样率组的数据排列在一起，相似采样率的变量通常具有较强的相关性，可以使模型更稳定地利用同采样层级变量之间的相关信息。数据分块示意如图\ref{fig:data_chunking}所示。其中红色代表缺失样本。
 
     \subsection{自监督再遮挡机制}
 
@@ -418,11 +443,11 @@
     \end{equation}
     这种自监督构造使模型可以在具有真实值的位置上学习缺失恢复能力，同时保持结构性缺失场景下的训练一致性。由于人为遮挡仅发生在原本可观测的位置，插补误差始终可以与真实值对齐计算，因此训练目标具有明确的统计意义。
 
-    \section{通用采样率感知Transformer重构检测器}
+    \section{采样率感知Transformer重构检测器}
 
     \subsection{设计思想}
 
-    缺失值恢复之后，仍需要从完整窗口中判断样本是否偏离正常运行规律。VAE-Transformer 与 AGF-ADNet 均在插补模块之后引入采样率感知 Transformer 重构检测器。该检测器面向完整窗口 $\mathbf{X}^{\mathrm{comp}}$ 学习正常模式下的全局演化规律，再以重构偏差刻画异常程度。通过先获得较为完整的窗口表示，检测器可以更集中地刻画系统在正常工况下的全局时序结构，而不必直接在高度缺失的输入上同时学习缺失模式与异常模式。
+    缺失值恢复之后，仍需要从完整窗口中判断样本是否偏离正常运行规律。VAE-Former 与 AGF-ADNet 均在插补模块之后引入采样率感知 Transformer 重构检测器。该检测器面向完整窗口 $\mathbf{X}^{\mathrm{comp}}$ 学习正常模式下的全局演化规律，再以重构偏差刻画异常程度。通过先获得较为完整的窗口表示，检测器可以更集中地刻画系统在正常工况下的全局时序结构，而不必直接在高度缺失的输入上同时学习缺失模式与异常模式。
 
     \subsection{变量级编码与采样相位建模}
 
@@ -483,7 +508,7 @@
 
     在当前实验设置中，检测器采用 3 层 Transformer 编码器，时间 Token 维度为 128，多头注意力头数为 4。Transformer 可以直接在整个窗口范围内建模任意两个时间位置之间的依赖关系，因此不仅能够感知局部突变，也能够刻画慢变漂移、周期累积误差以及跨阶段状态转移。
 
-    \section{通用异常判别流程}
+    \section{异常判别流程}
 
     两类方法均使用训练集上的正常样本学习重构规律，并在原始可观测位置上计算检测器损失：
     \begin{equation}
@@ -503,7 +528,7 @@
     \end{equation}
     其中 $\alpha \in (0,1]$ 为平滑系数，当前取值为 $0.3$。若测试数据由多个独立工况片段组成，则分别在各片段内部执行平滑，以避免跨片段信息泄漏。
 
-    在训练分数分布基础上，异常判别阈值可采用高分位数约束的方式确定。
+    在训练分数分布基础上，异常判别阈值采用高分位数约束的方式确定。
     \begin{equation}
         \theta
         =
@@ -513,7 +538,7 @@
             \operatorname{Quantile}_{q}(\tilde{s}_{\mathrm{tr}})
         \right),
     \end{equation}
-    其中，$\kappa=2.0$，$q=0.95$。对于 VAE-Transformer 这类简化验证模型，也可以退化为训练分数均值阈值，以减少额外超参数对方法可行性判断的影响。据此得到初始预测结果
+    其中，$\kappa=2.0$，$q=0.95$。
     \begin{equation}
         \hat{y}_t =
         \begin{cases}
@@ -523,13 +548,13 @@
     \end{equation}
     考虑到工业异常通常具有一定持续时间，进一步对预测结果施加最短持续长度约束。若某一连续异常片段长度小于预设阈值 $L_{\min}$，则将该片段抑制为正常状态。在当前实验中，$L_{\min}=50$。
 
-    \section{VAE-Transformer模型设计}
+    \section{VAE-Former模型设计}
 
     \subsection{模型定位与总体结构}
 
-    VAE-Transformer 是本文在 AGF-ADNet 之前构建的简化验证模型。该模型不引入自适应图学习、频域重构专家和门控融合机制，而是采用掩码感知变分自编码器（Variational Autoencoder, VAE）完成缺失值补全，再将补全后的完整窗口输入采样率感知 Transformer 进行无监督异常检测。其目的在于验证：即使插补器结构较简单，只要显式利用缺失掩码并在检测阶段引入采样率信息，仍可形成一条可运行的多采样率异常检测链路。
+    VAE-Former 是本文在 AGF-ADNet 之前构建的验证模型。该模型不引入自适应图学习、频域重构专家和门控融合机制，而是采用掩码感知变分自编码器（Variational Autoencoder, VAE）完成缺失值补全，再将补全后的完整窗口输入采样率感知 Transformer 进行无监督异常检测。其目的在于验证：即使插补器结构较简单，只要显式利用缺失掩码并在检测阶段引入采样率信息，仍可形成一条可运行的多采样率异常检测链路。
 
-    VAE-Transformer 的主要流程为
+    VAE-Former 的主要流程为
     \begin{align}
         \mathbf{X}^{\mathrm{vae}} &= \mathcal{V}_{\psi}\!\left(\mathbf{X}^{\mathrm{in}},\widetilde{\mathbf{M}}\right), \\
         \mathbf{X}^{\mathrm{comp}} &= \mathbf{X}^{\mathrm{in}} + \widetilde{\mathbf{M}} \odot \mathbf{X}^{\mathrm{vae}}, \\
@@ -539,7 +564,7 @@
 
     \begin{table}[htbp]
         \centering
-        \caption{VAE-Transformer 主要模块及输入输出}
+        \caption{VAE-Former 主要模块及输入输出}
         \label{tab:vae_transformer_modules}
         \begin{tabular}{p{2.4cm} p{4.8cm} p{2.8cm} p{2.8cm}}
             \hline
@@ -588,11 +613,11 @@
         \widetilde{\mathbf{M}} \odot \mathbf{X}^{\mathrm{vae}}.
     \end{equation}
 
-    该结构的优点是实现简单、训练稳定，能够通过潜变量学习窗口整体分布；其局限也较为明确：编码器和解码器主要由全连接层构成，对变量间显式拓扑关系、局部频谱结构和多尺度动态过程的表达能力有限。因此，VAE-Transformer 更适合作为验证“掩码插补加全局重构”范式的简化模型，而不是最终的增强模型。
+    该结构的优点是实现简单、训练稳定，能够通过潜变量学习窗口整体分布；其局限也较为明确：编码器和解码器主要由全连接层构成，对变量间显式拓扑关系、局部频谱结构和多尺度动态过程的表达能力有限。因此，VAE-Former 更适合作为验证掩码插补加全局重构范式的简化模型，而不是最终的增强模型。
 
     \subsection{仅观测点反向传播的训练目标}
 
-    VAE-Transformer 对缺失值训练的处理参考了 MC-CNN 中改进 BP 算法的思想\citess{song_soft_2025}：可以将其理解为对 BP 神经网络的误差反传过程进行掩码化修改，在反向传播时重构相关损失只由观测点贡献，结构性缺失点的误差项被掩码置零，不参与参数梯度更新。这样可以避免模型把缺失占位值误当作真实监督信号。
+    VAE-Former 对缺失值训练的处理参考了 MC-CNN 中改进 BP 算法的思想\citess{song_soft_2025}：可以将其理解为对 BP 神经网络的误差反传过程进行掩码化修改，在反向传播时重构相关损失只由观测点贡献，结构性缺失点的误差项被掩码置零，不参与参数梯度更新。这样可以避免模型把缺失占位值误当作真实监督信号。
 
     具体而言，再遮挡位置 $\mathbf{R}$ 是原本可观测位置的子集，因此可用于构造插补监督损失：
     \begin{equation}
@@ -633,13 +658,12 @@
 
     \subsection{检测器训练与异常评分}
 
-    VAE-Transformer 采用分阶段训练方式。首先训练掩码感知 VAE 插补器；随后固定 VAE 参数，用其生成完整窗口 $\mathbf{X}^{\mathrm{comp}}$，再训练采样率感知 Transformer 检测器。检测器的重构损失同样只在原始可观测位置上计算：
+    VAE-Former 采用分阶段训练方式。首先训练掩码感知 VAE 插补器；随后固定 VAE 参数，用其生成完整窗口 $\mathbf{X}^{\mathrm{comp}}$，再训练采样率感知 Transformer 检测器。检测器的重构损失同样只在原始可观测位置上计算：
     \begin{equation}
         \mathcal{L}_{\mathrm{det}}^{\mathrm{VT}}
         =
         \frac{\|(\hat{\mathbf{X}}-\mathbf{X}^{\mathrm{comp}}) \odot \mathbf{O}\|_F^2}{\|\mathbf{O}\|_1 + \varepsilon}.
     \end{equation}
-    与 AGF-ADNet 的端到端联合优化相比，分阶段训练降低了模块耦合度，便于验证 VAE 插补和 Transformer 检测各自的作用，但也使插补器难以直接接收检测任务的反馈信号。
 
     在异常评分阶段，首先计算检测器重构分数
     \begin{equation}
@@ -653,7 +677,7 @@
         =
         \frac{\|(\mathbf{X}_b^{\mathrm{vae}}-\mathbf{X}_b)\odot \mathbf{O}_b\|_F^2}{\|\mathbf{O}_b\|_1 + \varepsilon}.
     \end{equation}
-    此外，模型可选地从补全窗口中提取均值、标准差、一阶差分和低频谱幅值等统计特征，构造分布漂移分数 $s_b^{\mathrm{shift}}$。经训练集分布标准化后，VAE-Transformer 的最终异常分数写为
+    此外，模型可选地从补全窗口中提取均值、标准差、一阶差分和低频谱幅值等统计特征，构造分布漂移分数 $s_b^{\mathrm{shift}}$。经训练集分布标准化后，VAE-Former 的最终异常分数写为
     \begin{equation}
         s_b^{\mathrm{VT}}
         =
@@ -667,13 +691,15 @@
 
     \section{本章小结}
 
-    本章首先从两类方法中抽取出共同的数据表示、窗口构造、采样率元数据、再遮挡自监督、采样率感知 Transformer 重构检测器以及异常判别流程。在此基础上，进一步给出了 VAE-Transformer 简化验证模型。该模型以掩码感知 VAE 作为插补器，并参考 MC-CNN 的改进 BP 思路，使重构相关损失仅在可观测位置反向传播，从而避免缺失占位值形成错误监督。VAE-Transformer 为后续 AGF-ADNet 的设计提供了基础验证：仅依靠简化插补器能够建立完整检测链路，但对变量耦合关系和频域周期结构的显式利用仍然不足。
+    本章首先阐述了两类方法中共用的数据表示、窗口构造、采样率元数据、再遮挡自监督、采样率感知 Transformer 重构检测器以及异常判别流程。在此基础上，进一步给出了 VAE-Former 验证模型。该模型以掩码感知 VAE 作为插补器，并参考 MC-CNN 的改进 BP 思路，使重构相关损失仅在可观测位置反向传播，从而避免缺失占位值形成错误监督。VAE-Former 为后续 AGF-ADNet 的设计提供了基础验证：仅依靠简化插补器能够建立完整检测链路，但对变量耦合关系和频域周期结构的显式利用仍然不足。
 
-    \chapter{AGF-ADNet模型设计}
+    \chapter{基于AGF-ADNet的多采样率异常检测方法研究}
+
+    本章在上一章通用流程和 VAE-Former 验证模型的基础上，进一步提出面向多采样率电源系统的 AGF-ADNet。该模型围绕结构性缺失、变量耦合关系和周期频谱信息三个关键问题展开，通过图重构专家、频域重构专家、采样率感知门控融合以及多源异常评分机制提升模型对复杂异常模式的表达能力。
 
     \section{模型定位与特化框架}
 
-    在上一章通用框架基础上，AGF-ADNet 面向多采样率电源系统中的变量耦合、周期频谱和全局动态特征进行增强建模。与 VAE-Transformer 相比，AGF-ADNet 不再使用单一全连接 VAE 生成补全结果，而是将插补阶段拆分为自适应图重构专家、频域重构专家和采样率感知门控融合三个部分，并与 Transformer 检测器联合优化。
+    在上一章框架基础上，AGF-ADNet 面向多采样率电源系统中的变量耦合、周期频谱和全局动态特征进行增强建模。与 VAE-Former 相比，AGF-ADNet 不再使用单一全连接 VAE 生成补全结果，而是将插补阶段拆分为自适应图重构专家、频域重构专家和采样率感知门控融合三个部分，并与 Transformer 检测器联合优化。
 
     AGF-ADNet 的设计动机来自三个相互耦合的问题：缺失位置会削弱时序连续性，变量之间存在非平稳耦合关系，不同采样频率下的周期结构和相位信息难以通过统一时域模型充分表达。若仅将缺失恢复视为独立数据清洗步骤，插补结果往往只追求点值误差最小，无法兼顾后续异常判别所需的结构信息；若直接在缺失序列上执行异常检测，模型又容易将采样率差异和缺失模式混同为异常信号。因此，AGF-ADNet 将缺失恢复、结构建模和异常判别纳入同一优化框架，使插补结果既要接近真实观测，也要有利于后续全局重构和异常区分。
 
@@ -710,7 +736,7 @@
     \end{table}
 
     模型的整体结构如图\ref{fig:model_structure}所示。
-    \begin{figure}[!tb]
+    \begin{figure}[!htbp]
         \centering
         \includegraphics[width=0.92\linewidth,height=0.55\textheight,keepaspectratio]{simple.drawio.pdf}
         \caption{模型整体结构}
@@ -789,16 +815,12 @@
 其中 \(\bm{x}^{\text{train}}_{:,n}\) 是标准化训练集，\(\bm{o}^{\text{train}}_{:,n}=1-\bm{M}^{\text{train}}_{s,:,n}\) 是该变量的观测模式，默认 \(\lambda=0.5\)。
 
 然后通过欧氏距离定义变量间距离
-
-\begin{equation}
-    D_{n,m} = \left\lVert \bm{u}_n - \bm{u}_m \right\rVert_2.
-\end{equation}
+$$ D_{n,m} = \left\lVert \bm{u}_n - \bm{u}_m \right\rVert_2. $$
 进一步把距离矩阵变成相似度先验\citess{chen_adaptive_2024}
 \begin{equation}
     P_{n,m} = \frac{1}{1 + D_{n,m}/\eta},
 \end{equation}
-其中 \(\eta\) 是距离矩阵正元素的中位数。由于对角线距离被强制置零，这个先验只作用于非对角项。
-
+其中 \(\eta\) 是距离矩阵正元素的中位数。
 
     并利用归一化节点表示计算余弦相似度
     \begin{equation}
@@ -1140,14 +1162,18 @@
 
     \section{本章小结}
 
-    本章在通用多采样率建模框架基础上，围绕 AGF-ADNet 的特化结构与机理，对双向预插补、自适应图学习、图重构专家、频域重构专家、采样率感知门控融合、联合训练目标以及多源异常评分机制进行了系统阐述。与 VAE-Transformer 相比，AGF-ADNet 通过图频双专家和门控融合显式利用变量耦合关系与周期频谱信息，并通过端到端联合优化实现插补与检测之间的协同约束，从而更充分地适应多采样率工业过程中的结构性缺失、变量耦合以及周期动态特征。
+    本章在通用多采样率建模框架基础上，围绕 AGF-ADNet 的特化结构与机理，对双向预插补、自适应图学习、图重构专家、频域重构专家、采样率感知门控融合、联合训练目标以及多源异常评分机制进行了系统阐述。与 VAE-Former 相比，AGF-ADNet 通过图频双专家和门控融合显式利用变量耦合关系与周期频谱信息，并通过端到端联合优化实现插补与检测之间的协同约束，从而更充分地适应多采样率工业过程中的结构性缺失、变量耦合以及周期动态特征。
 
 
 	\chapter{实验设计}
 
+    本章对实验平台、评价指标、对比方法和结果分析进行集中说明。与前两章的方法描述不同，本章重点回答所提模型在三相全桥逆变系统多采样率数据上的实际检测效果，并通过对比实验、消融实验和参数敏感性实验分析模型性能来源。
+
     \section{指标设置}
 
-    为全面评价 AGF-ADNet 在多采样率异常检测任务中的判别性能，本文将异常检测问题视为二分类任务，采用准确率、精确率、召回率、故障检测率、误报率和 F1-Score 六项指标。上述指标能够从不同角度刻画模型在正常样本与异常样本上的判别表现，避免单一指标导致的评价片面性。
+    为全面评价 AGF-ADNet 在多采样率异常检测任务中的判别性能，本文在测试阶段将模型输出整理为正常与异常两类结果，并采用准确率、精确率、召回率、故障检测率、误报率和 F1-Score 六项指标。上述指标能够从不同角度刻画模型在正常样本与异常样本上的判别表现，避免单一指标导致的评价片面性。
+
+    需要强调的是，二分类形式主要用于结果统计和模型比较。本文模型的训练过程仍以正常工况数据为主体，通过学习正常样本的重构误差分布确定异常阈值；测试集中的异常标签只用于计算 TP、TN、FP 和 FN 等评价量，并不用于指导模型学习具体故障类别。因此，后续 Accuracy、Precision、Recall 等指标反映的是异常检测结果的判别质量，而不是有监督故障分类器对已知故障类别的分类能力。
 
     \subsection{判别结果定义}
 
@@ -1228,20 +1254,20 @@
         \frac{2TP}{2TP + FP + FN}.
     \end{equation}
 
-    F1-Score 本质上是精确率和召回率的调和平均，因此只有当二者都保持较高水平时，F1-Score 才会取得较大数值。对于多采样率异常检测任务而言，F1-Score 能够较好地反映模型在异常发现能力与报警可靠性之间的综合平衡状态，因此作为最终性能比较中的关键指标之一。
+    F1-Score 是精确率和召回率的调和平均，只有当二者都保持较高水平时，F1-Score 才会取得较大数值。就异常检测任务而言，F1-Score 能较好地反映模型在异常检测能力与可靠性间的综合状态，因此作为最终性能比较中的关键指标之一。
 
     \section{实验流程介绍}
 
-    实验整体流程如图\ref{fig:flow_chart}所示
-
     \begin{figure}[!htbp]
         \centering
-        \includegraphics[width=0.85\linewidth]{flow_chart.drawio.pdf}
+        \includegraphics[width=0.825\linewidth]{flow_chart.drawio.pdf}
         \caption{实验整体流程}
         \label{fig:flow_chart}
     \end{figure}
 
-    论文将使用的实验数据通过三相全桥逆变系统实验平台进行采集，实验对象为绝缘栅双极型晶体管（Insulated gate bipolar transistor, IGBT）。逆变器系统是一种可以将直流电转换为三相交流电的基础电力电子设备，而IGBT 则是该系统中的关键开关器件，其键合引线、滤波电感和电容等关键部件易发生性能退化，进而引发系统故障。\citess{20241,fei_liu_design_2009}为了模拟真实故障场景，将实际运行状态下可能发生的故障植入到IGBT中，以收集故障样本。为模拟实际工况中常见的电感器匝间短路故障，实验设计中通过在滤波电感的两端并联一个可调电阻器，以复现此类故障特征并采集相应的故障状态样本。获取得到的数据集包含每项六个基于电压测量得到的特征，合计十八个特征，分别包含：平均值$\bar{V}$、峰峰值$V_{pp}$、均方根值$V_{rms}$、频率$f$、裕度$M_v$和峭度$K_v$。
+    实验整体流程如图\ref{fig:flow_chart}所示，给出了本文实验的整体处理链路：原始逆变器监测数据首先经多采样率构造和缺失掩码生成形成模型输入，随后分别送入对比模型、VAE-Former 或 AGF-ADNet 进行重构和异常评分，最后通过训练集确定的阈值完成正常/异常判别，并使用统一评价指标进行性能比较。
+
+    论文将使用的实验数据通过三相全桥逆变系统实验平台进行采集，实验对象为绝缘栅双极型晶体管（Insulated gate bipolar transistor, IGBT）。逆变器系统是一种可以将直流电转换为三相交流电的基础电力电子设备，而 IGBT 则是该系统中的关键开关器件，其键合引线、滤波电感和电容等关键部件易发生性能退化，进而引发系统故障\citess{20241,fei_liu_design_2009}。为了模拟真实故障场景，将实际运行状态下可能发生的故障植入到 IGBT 中，以收集故障样本。为模拟实际工况中常见的电感器匝间短路故障，实验设计中通过在滤波电感的两端并联一个可调电阻器，以复现此类故障特征并采集相应的故障状态样本。获取得到的数据集包含每项六个基于电压测量得到的特征，合计十八个特征，分别包含：平均值 $\bar{V}$、峰峰值 $V_{pp}$、均方根值 $V_{rms}$、频率 $f$、裕度 $M_v$ 和峭度 $K_v$。
 
     \begin{figure}[!htbp]
     \centering
@@ -1270,6 +1296,8 @@
     \label{fig:experiment_setup}
     \end{figure}
 
+    图\ref{fig:experiment_setup}展示了实验平台的主要硬件组成。其中，控制面板用于设置和切换运行状态，示波器功率分析仪用于观测电压波形及相关功率特征，数据采集板负责采集和传输实验过程中的多路监测信号，IGBT 驱动板则对应逆变器功率开关的驱动与控制环节。上述硬件共同构成了本文故障样本采集和多变量状态监测的数据来源。
+
     实验数据集被划分为训练集、验证集与测试集。训练集和验证集分别包含样本个数为4000和1000的正常样本。测试集按照时序分别包含2000个正常样本和2000个异常样本。通过对完整的数据集进行降采样，得到最终实验需要的包含不同采样率变量的数据集。
 
 
@@ -1290,8 +1318,10 @@
 		\end{tabular}
 	\end{table}
 
+    表\ref{tab: 人工特征描述及其采样情况}列出了本文使用的六类电压人工特征及其重采样设置。重采样周期越大，表示该变量在统一时间轴上观测越稀疏，因而会产生更多结构性缺失；样本规模则反映不同采样率变量在完整时间序列中的有效观测数量。该设置用于模拟电源系统中不同监测变量采样频率不一致的工程场景。
+
     \section{实验结果}
-    传统模型，包括 CNN、LSTM、VAE 和 Transformer 的可视化检测结果如图所示。
+
     \begin{figure}[!htbp]
     \centering
     \subfloat[CNN 检测结果]{
@@ -1302,7 +1332,11 @@
         \includegraphics[width=0.5\linewidth]{fig/baseline/LSTM_detection_results.png}
         \label{fig:lstm_results}
     }
+    \caption{传统方法检测结果对比（一）}
+    \label{fig:baseline_comparison_basic}
    \end{figure}
+
+    \clearpage
 
     \begin{figure}[!htbp]
     \centering
@@ -1314,9 +1348,11 @@
         \includegraphics[width=0.5\linewidth]{fig/baseline/transformer_detection_results.png}
         \label{fig:transformer_results}
     }
-    \caption{传统方法检测结果对比}
+    \caption{传统方法检测结果对比（二）}
     \label{fig:baseline_comparison}
     \end{figure}
+
+    传统模型，包括 CNN、LSTM、VAE 和 Transformer 的可视化检测结果如图\ref{fig:baseline_comparison_basic}和图\ref{fig:baseline_comparison}所示。图\ref{fig:baseline_comparison_basic}和图\ref{fig:baseline_comparison}中的四个子图分别对应 CNN、LSTM、VAE 和 Transformer 的检测结果。各子图横轴为测试样本索引，纵轴为重构误差；绿色曲线表示模型在各测试样本上的异常分数，红色横虚线表示由训练集异常分数确定的检测阈值，红色竖虚线表示测试集中正常样本与异常样本的分界位置。当绿色异常分数持续超过红色阈值时，模型倾向于将对应样本判定为异常。由图可见，传统模型对异常区间的响应不够连续，部分异常样本的重构误差未能稳定越过阈值，因而容易产生漏检。
 
     传统模型的性能指标如表\ref{tab:baseline_metrics}所示。
 
@@ -1346,7 +1382,7 @@
         width=0.78\linewidth,
         height=0.34\textheight,
         boxplot/draw direction=y,
-        ylabel={Accuracy/Precision/FDR/F1-Score (\%)},
+        ylabel={Acc/Prec/FDR/F1 (\%)},
         ymin=0,
         ymax=100,
         ymajorgrids=true,
@@ -1407,10 +1443,12 @@
     \label{fig:traditional_model_boxplot}
     \end{figure}
 
+    图\ref{fig:traditional_model_boxplot}的横轴为不同模型，纵轴为 Accuracy、Precision、FDR 和 F1-Score 四项指标的百分数取值。每个箱体由同一模型的四项核心指标构成，箱体位置越高表示该模型整体性能越好，箱体跨度越小表示四项指标之间越均衡；若箱体内部指标差异较大，则说明该模型可能在某些指标上表现突出但在其他指标上存在短板。
+
     结合表\ref{tab:baseline_metrics}和图\ref{fig:traditional_model_boxplot}可以看出，VAE 在传统方法中表现最好，Accuracy、Recall 和 F1-Score 分别达到 77.92\%、60.60\% 和 73.30\%，Transformer 次之；CNN 与 LSTM 的检测效果相对较弱，尤其是 LSTM 的 Recall 仅为 22.95\%，说明其对异常样本的识别能力明显不足。尽管部分传统模型在 Precision 上达到 0.92 左右，但其 Recall 普遍偏低，同时，各模型的 FAR 仍处于较高水平，未能有效适应多采样率数据的结构特征，其综合性能难以满足异常检测的实际需求。
 
 
-    MC-CNN、MRA-LSTM、Multirate Former 、MR-FA 等前沿方法检测结果如图\ref{fig:new_baseline_comparison}所示。与传统模型相比，这些方法的检测效果有所改善，但从整体结果来看召回率和误报率仍存在改进空间。
+    MC-CNN、MRA-LSTM、Multirate Former 、MR-FA 等前沿方法检测结果如图\ref{fig:new_baseline_comparison_part1}和图\ref{fig:new_baseline_comparison}所示。与传统模型相比，这些方法的检测效果有所改善，但从整体结果来看召回率和误报率仍存在改进空间。
 
     \begin{figure}[!htbp]
     \centering
@@ -1424,7 +1462,11 @@
         \includegraphics[width=0.48\linewidth]{fig/baseline/mra_lstm_detection.png}
         \label{fig:mralstm_results}
     }
+    \caption{前沿方法检测结果对比（一）}
+    \label{fig:new_baseline_comparison_part1}
     \end{figure}
+
+    \clearpage
 
     \begin{figure}[!htbp]
     \centering
@@ -1437,12 +1479,14 @@
         \includegraphics[width=0.48\linewidth]{fig/baseline/mr_fa_detection.png}
         \label{fig:mrfa_results}
     }
-    \caption{前沿方法检测结果对比}
+    \caption{前沿方法检测结果对比（二）}
     \label{fig:new_baseline_comparison}
     \end{figure}
 
+    图\ref{fig:new_baseline_comparison_part1}和图\ref{fig:new_baseline_comparison}展示了四种前沿多采样率异常检测方法的异常分数变化。图中 MR-FA 和 MRA-LSTM 相比传统方法已有更明显的异常响应，但在异常区间内仍存在低于阈值的片段，说明漏检问题尚未完全解决。
 
-    前沿建模方法的性能指标如表\ref{tab:new_model_metrics}所示。MR-FA 在对比方法中表现最优，Accuracy、Recall 和 F1-Score 分别为 86.92\%、77.20\% 和 85.52\%；MRA-LSTM 紧随其后，整体指标也保持在较高水平。Multirate Former 的表现处于中等水平。MC-CNN 则表现最差，其 Recall 仅为 3.35\%，并不具备检测能力
+
+    前沿建模方法的性能指标如表\ref{tab:new_model_metrics}所示。MR-FA 在对比方法中最优，Accuracy、Recall 和 F1-Score 分别为 86.92\%、77.20\% 和 85.52\%；MRA-LSTM 次之，整体水平较高。Multirate Former 处于中等水平。MC-CNN 最差，不具备检测能力。
 
   \begin{table}[!htbp]
       \caption{前沿模型分类指标对比}
@@ -1460,113 +1504,67 @@
       \end{tabular}
   \end{table}
 
-
-    本文所提出方法的可视化检测结果如图\ref{fig:agf-adnet_fig}所示，各项性能指标如表\ref{tab:agf_adnet_model_metrics}所示。从定量结果看，AGF-ADNet 在测试集上取得了 99.10\% 的准确率、100.00\% 的精确率、98.20\% 的召回率、0.00\% 的误报率以及 99.10\% 的 F1-Score。相较于表现最优的对比方法 MR-FA，准确率提升了 12.18 个百分点，召回率提升了 21.00 个百分点，F1-Score 提升了 13.58 个百分点，同时将误报率由 3.35\% 降至 0.00\%。精确率达到 100.00\% ，召回率达到 98.20\% 。上述结果表明，所提方法不仅显著提升了异常检测的灵敏度，也兼顾了误报抑制能力，在综合性能上明显优于现有对比模型。
-
-  \begin{table}[!htbp]
-      \caption{AGF-ADNet 分类指标}
-      \label{tab:agf_adnet_model_metrics}
-      \begin{tabular}{p{2.0cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm}}
-          \toprule
-          \textbf{模型} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{FDR} &
-  \textbf{FAR} & \textbf{F1-Score} \\
-          \midrule
-          AGF-ADNet & 0.9910 & 1.0000 & 0.9820 & 0.9820 & 0.0000 & 0.9910 \\
-          \bottomrule
-      \end{tabular}
-  \end{table}
+    \subsection{VAE-Former实验结果}
+    VAE-Former可视化检测结果如图\ref{fig:vae-former_fig}所示。
 
     \begin{figure}[!htbp]
-    \centering
-    \includegraphics[width=0.5\linewidth]{agf-adnet.png}
-    \caption{AGF-ADNet 检测结果}
-    \label{fig:agf-adnet_fig}
-  \end{figure}
-
-    为了更直观地比较各模型在核心分类指标上的整体分布特征，进一步选取 Accuracy、Precision、FDR 和 F1-Score 四项指标绘制箱形图，如图\ref{fig:new_model_boxplot}所示。可以看出，AGF-ADNet 的箱体整体位于最高区间，中位数和上下四分位数均明显优于其余对比方法，说明其综合性能最优且稳定性最好；MR-FA 与 MRA-LSTM 构成第二梯队，整体表现接近但仍与本文方法存在明显差距；Multirate Former 的箱体位置居中，说明其检测能力有一定提升但总体水平仍有限；MC-CNN 的箱体集中在低值区间，且下须显著下探，进一步反映其在 FDR 和 F1 指标上的明显短板。
-
-    \begin{figure}[!htbp]
-    \centering
-    \captionsetup{font=normalsize}
-    \begin{tikzpicture}
-    \begin{axis}[
-        width=0.8\linewidth,
-        height=0.36\textheight,
-        boxplot/draw direction=y,
-        ylabel={Accuracy/Precision/FDR/F1-Score (\%)},
-        ymin=0,
-        ymax=100,
-        ymajorgrids=true,
-        grid style={dashed, gray!35},
-        xtick={1,2,3,4,5},
-        xticklabels={MC-CNN,MRA-LSTM,Multirate Former,MR-FA,AGF-ADNet},
-        x tick label style={rotate=18, anchor=east},
-        tick align=outside,
-        enlarge x limits=0.12
-    ]
-        \addplot+[
-            boxplot,
-            fill=teal!30,
-            draw=teal!70!black
-        ] table[row sep=\\, y index=0] {
-            data\\
-            50.08\\
-            51.15\\
-            3.35\\
-            6.29\\
-        };
-        \addplot+[
-            boxplot,
-            fill=orange!35,
-            draw=orange!80!black
-        ] table[row sep=\\, y index=0] {
-            data\\
-            85.62\\
-            94.50\\
-            75.65\\
-            84.03\\
-        };
-        \addplot+[
-            boxplot,
-            fill=cyan!28,
-            draw=cyan!65!black
-        ] table[row sep=\\, y index=0] {
-            data\\
-            79.27\\
-            94.93\\
-            61.85\\
-            74.90\\
-        };
-        \addplot+[
-            boxplot,
-            fill=red!28,
-            draw=red!70!black
-        ] table[row sep=\\, y index=0] {
-            data\\
-            86.92\\
-            95.84\\
-            77.20\\
-            85.52\\
-        };
-        \addplot+[
-            boxplot,
-            fill=green!28,
-            draw=green!50!black
-        ] table[row sep=\\, y index=0] {
-            data\\
-            99.10\\
-            100.00\\
-            98.20\\
-            99.10\\
-        };
-    \end{axis}
-    \end{tikzpicture}
-    \caption{五种方法核心指标箱形图}
-    \label{fig:new_model_boxplot}
+        \centering
+        \includegraphics[width=0.48\linewidth]{vae-former.png}
+        \caption{VAE-Former检测结果}
+        \label{fig:vae-former_fig}
     \end{figure}
 
+    图\ref{fig:vae-former_fig}反映 VAE-Former 能够较充分地覆盖故障窗口；但在红色竖虚线之前的正常测试区间内也存在若干超过红色横虚线的片段，表明该模型仍会将部分正常波动误判为异常，这与后续表中较高的误报率相对应。
 
-    为更加直观的比较传统方法、前沿方法与本文方法在核心指标上的整体表现，进一步绘制 9 种方法的拆分雷达图，如图\ref{fig:all_methods_radar}所示。各子图采用完全一致的半径刻度范围，便于直接比较不同方法在四项核心指标上的整体包络形态。可以看出，AGF-ADNet 在四个维度上均接近最外圈，整体面积最大，说明其综合性能最优；MR-FA 与 MRA-LSTM 构成第二梯队；VAE、Transformer 与 Multirate Former 处于中间水平；CNN、LSTM 和尤其是 MC-CNN 的雷达区域明显收缩，表明其在多采样率场景下的异常检测能力仍存在较大局限。
+    各项性能指标如表\ref{tab:vae_former_model_metrics}所示。
+
+    \begin{table}[!htbp]
+        \caption{VAE-Former分类指标}
+        \label{tab:vae_former_model_metrics}
+        \begin{tabular}{p{2.0cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm}}
+            \toprule
+            \textbf{模型} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{FDR} &
+    \textbf{FAR} & \textbf{F1-Score} \\
+            \midrule
+            VAE-Former & 0.9165 & 0.8568 & 1.0000 &  1.0000 & 0.1670 & 0.9229 \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+
+    表\ref{tab:vae_former_model_metrics}给出了 VAE-Former 在同一测试集上的指标结果。其 Recall 和 FDR 均为 100.00\%，说明异常区间内样本全部被检出；但 FAR 为 16.70\%，说明正常区间内存在较多误报，这与图中正常段部分绿色曲线越过阈值的现象一致。
+
+    VAE-Former 作为验证模型，在测试集上取得了 91.65\% 的准确率、85.68\% 的精确率、100.00\% 的召回率和 92.29\% 的 F1-Score，说明掩码感知 VAE 插补与采样率感知 Transformer 重构检测的组合能够充分覆盖故障窗口，验证了先插补后检测范式在多采样率异常检测任务中的可行性。但 VAE-Former 的误报率为 16.70\%，表明单一 VAE 插补器对正常样本边界的刻画仍不够稳定，容易将部分正常波动放大为异常响应。
+
+    \subsection{AGF-ADNet实验结果}
+    AGF-ADNet可视化检测结果如图\ref{fig:agf-adnet_fig}所示。    
+
+    \begin{figure}[!htbp]
+        \centering
+        \includegraphics[width=0.48\linewidth]{agf-adnet.png}
+        \caption{AGF-ADNet检测结果}
+        \label{fig:agf-adnet_fig}
+    \end{figure}
+
+    各项性能指标如表\ref{tab:agf_adnet_model_metrics}所示。
+    \begin{table}[!htbp]
+        \caption{本文模型分类指标}
+        \label{tab:agf_adnet_model_metrics}
+        \begin{tabular}{p{2.0cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm} p{1.6cm}}
+            \toprule
+            \textbf{模型} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{FDR} &
+    \textbf{FAR} & \textbf{F1-Score} \\
+            \midrule
+            AGF-ADNet & 0.9910 & 1.0000 & 0.9820 & 0.9820 & 0.0000 & 0.9910 \\
+            \bottomrule
+        \end{tabular}
+    \end{table}
+
+    表\ref{tab:agf_adnet_model_metrics}进一步给出了 AGF-ADNet 的定量指标。Precision 为 100.00\% 且 FAR 为 0.00\%，说明在当前测试划分中模型没有将正常样本误报为异常；Recall 与 FDR 为 98.20\%，说明绝大多数异常样本被成功检出；F1-Score 为 99.10\%，表明检出能力和告警可信度之间取得了较好平衡。
+
+    从定量结果看，AGF-ADNet 在测试集上取得了 99.10\% 的准确率、100.00\% 的精确率、98.20\% 的召回率、0.00\% 的误报率以及 99.10\% 的 F1-Score。相较于本实验中表现最优的对比方法 MR-FA，准确率提升了 12.18 个百分点，召回率提升了 21.00 个百分点，F1-Score 提升了 13.58 个百分点，同时将误报率由 3.35\% 降至 0.00\%。相较于 VAE-Former，AGF-ADNet 的准确率和 F1-Score 分别提升 7.45 和 6.81 个百分点，误报率由 16.70\% 降至 0.00\%，说明图频双专家插补、门控融合与多源异常评分能够在保持较高异常检出能力的同时显著提升正常样本识别稳定性。上述结果表明，在当前数据集和评价协议下，AGF-ADNet 不仅提升了异常检测的灵敏度，也兼顾了误报抑制能力，综合性能优于现有对比模型和验证模型。
+
+    \section{实验总结}
+    绘制 10 种方法的拆分雷达图，如图\ref{fig:all_methods_radar}所示。
 
     \newcommand{\methodradar}[3]{
     \begin{minipage}{0.31\linewidth}
@@ -1626,20 +1624,124 @@
     \hfill
     \methodradar{MR-FA}{brown!80!black}{(0,86.92) (90,95.84) (180,77.20) (270,85.52) (360,86.92)}
     \hfill
+    \methodradar{VAE-Former}{violet!75!black}{(0,91.65) (90,85.68) (180,100.00) (270,92.29) (360,91.65)}
+
+    \vspace{0.8em}
+
     \methodradar{AGF-ADNet}{black}{(0,99.10) (90,100.00) (180,98.20) (270,99.10) (360,99.10)}
-    \caption{九种方法拆分雷达图对比}
+    \caption{十种方法拆分雷达图对比}
     \label{fig:all_methods_radar}
     \end{figure}
 
+    图\ref{fig:all_methods_radar}中，每个小雷达图对应一种模型，四个方向分别表示 Accuracy、Precision、FDR 和 F1-Score，半径越接近外圈表示该指标越高。雷达图面积越大且形状越均衡，说明模型在总体准确率、告警可信度、异常检出率和综合性能之间越协调；若某一方向明显内收，则表示对应指标是该模型的主要短板。
 
-    综合分析认为，本文方法性能提升的原因主要体现在三个方面：其一，双向预插补与自监督再遮挡机制改善了多采样率对齐后缺失值恢复的初始质量，为后续检测提供了更可靠的数据基础；其二，自适应图重构专家与频域重构专家分别从变量耦合关系和周期频谱结构两个角度补充信息，使模型能够同时感知跨变量关联异常与谐波、振荡类异常；其三，采样率感知 Transformer 与多源异常评分机制增强了模型对长程依赖、缓慢漂移以及局部突变等多类型异常的统一判别能力。因此，AGF-ADNet 在复杂电源系统多采样率场景下表现出更高的检测精度和更好的工程应用潜力。
+    AGF-ADNet 在四个维度上均接近最外圈，整体面积最大，说明其综合性能最优；VAE-Former 的雷达区域明显大于多数对比方法，且 FDR 达到外圈，但 Precision 方向存在内收，说明该模型以较高异常覆盖率换取了一定误报代价；MR-FA 与 MRA-LSTM 构成对比方法中的较优梯队；VAE、Transformer 与 Multirate Former 处于中间水平；CNN、LSTM 和尤其是 MC-CNN 的雷达区域明显收缩，表明其在多采样率场景下的异常检测能力仍存在较大局限。
+
+    \clearpage
+
+    进一步选取 Accuracy、Precision、FDR 和 F1-Score 绘制箱形图，如图\ref{fig:new_model_boxplot}所示。
+
+    \begin{figure}[!htbp]
+    \centering
+    \captionsetup{font=normalsize}
+    \begin{tikzpicture}
+    \begin{axis}[
+        width=0.8\linewidth,
+        height=0.32\textheight,
+        boxplot/draw direction=y,
+        ylabel={Acc/Prec/FDR/F1 (\%)},
+        ymin=0,
+        ymax=100,
+        ymajorgrids=true,
+        grid style={dashed, gray!35},
+        xtick={1,2,3,4,5,6},
+        xticklabels={MC-CNN,MRA-LSTM,Multirate Former,MR-FA,VAE-Former,AGF-ADNet},
+        x tick label style={rotate=20, anchor=east},
+        tick align=outside,
+        enlarge x limits=0.12
+    ]
+        \addplot+[
+            boxplot,
+            fill=teal!30,
+            draw=teal!70!black
+        ] table[row sep=\\, y index=0] {
+            data\\
+            50.08\\
+            51.15\\
+            3.35\\
+            6.29\\
+        };
+        \addplot+[
+            boxplot,
+            fill=orange!35,
+            draw=orange!80!black
+        ] table[row sep=\\, y index=0] {
+            data\\
+            85.62\\
+            94.50\\
+            75.65\\
+            84.03\\
+        };
+        \addplot+[
+            boxplot,
+            fill=cyan!28,
+            draw=cyan!65!black
+        ] table[row sep=\\, y index=0] {
+            data\\
+            79.27\\
+            94.93\\
+            61.85\\
+            74.90\\
+        };
+        \addplot+[
+            boxplot,
+            fill=red!28,
+            draw=red!70!black
+        ] table[row sep=\\, y index=0] {
+            data\\
+            86.92\\
+            95.84\\
+            77.20\\
+            85.52\\
+        };
+        \addplot+[
+            boxplot,
+            fill=violet!24,
+            draw=violet!75!black
+        ] table[row sep=\\, y index=0] {
+            data\\
+            91.65\\
+            85.68\\
+            100.00\\
+            92.29\\
+        };
+        \addplot+[
+            boxplot,
+            fill=green!28,
+            draw=green!50!black
+        ] table[row sep=\\, y index=0] {
+            data\\
+            99.10\\
+            100.00\\
+            98.20\\
+            99.10\\
+        };
+    \end{axis}
+    \end{tikzpicture}
+    \caption{六种方法核心指标箱形图}
+    \label{fig:new_model_boxplot}
+    \end{figure}
+
+    图\ref{fig:new_model_boxplot}的横轴为参与综合比较的六种方法，AGF-ADNet 的箱体整体位于最高区间，中位数和上下四分位数均明显优于其余方法，说明其综合性能最优且稳定性最好；VAE-Former 的箱体也处于较高区间，但其 Precision 低于 AGF-ADNet，反映出误报控制仍有不足；MR-FA 与 MRA-LSTM 构成对比方法中的较优梯队，但仍与本文两种方法存在差距；Multirate Former 的箱体位置居中，说明其检测能力有一定提升但有限；MC-CNN 的箱体集中在低值区间，且下须显著下探，进一步反映其明显短板。
+
+    VAE-Former 与 AGF-ADNet 的结果共同验证了本文建模路线的有效性。VAE-Former 证明了掩码感知插补和采样率感知 Transformer 检测能够显著提升异常覆盖率，但其较高误报率也说明仅依赖单一潜变量插补器难以实现多采样率插补。AGF-ADNet 的性能提升主要体现在三个方面：其一，双向预插补与自监督再遮挡机制改善了多采样率对齐后缺失值恢复的初始质量；其二，自适应图重构专家与频域重构专家分别从变量耦合和周期频谱结构补充信息，使模型能够同时感知跨变量关联异常与谐波、振荡类异常；其三，采样率感知 Transformer 与多源异常评分机制增强了模型对长程依赖、缓慢漂移以及局部突变等异常的判别能力。因此，AGF-ADNet 在电源系统多采样率场景下表现出更高的检测精度和工程应用潜力。
 
     \clearpage
 
     \section{消融实验}
 
     \subsection{实验设置}
-    为验证 AGF-ADNet 中各组成模块的有效性，本文在相同训练集与测试集上设置消融实验。训练数据为正常工况样本，测试数据为故障样本；检测阈值均由训练集异常分数确定。评价指标包括 Accuracy、Precision、Recall、FDR、FAR 和 F1-Score。完整模型结果采用前文 AGF-ADNet 分类实验结果，消融模型结果来自下各实验输出。
+    由于 VAE-Former 主要用于验证多采样率插补--重构检测范式的可行性，而 AGF-ADNet 承载了本文的图频双专家、门控融合和多源异常评分等核心创新模块，因此消融实验重点围绕 AGF-ADNet 展开。为验证 AGF-ADNet 中各组成模块的有效性，本文在相同训练集与测试集上设置消融实验。训练数据为正常工况样本，测试数据为故障样本；检测阈值均由训练集异常分数确定。评价指标包括 Accuracy、Precision、Recall、FDR、FAR 和 F1-Score。完整模型结果采用前文 AGF-ADNet 分类实验结果，消融模型结果来自下各实验输出。
 
     \subsection{总体结果}
 
@@ -1664,6 +1766,8 @@
         \end{tabular}
     \end{table}
 
+    表\ref{tab:mra_ablation_results}中的模型设置列表示保留或移除的核心模块组合，其余列为相同测试集上的评价指标。通过比较完整模型与各消融模型，可以判断图专家、频域专家、门控融合、Transformer 检测器和采样率感知机制分别对最终异常检测性能的贡献。
+
     单频域专家重构输出和单图专家重构输出如图\ref{fig:freq_direct}所示
 
     \begin{figure}[!htbp]
@@ -1679,6 +1783,8 @@
         \caption{单专家重构输出检测结果对比}
         \label{fig:freq_direct}
     \end{figure}
+
+    图\ref{fig:freq_direct}中的两个子图分别展示仅使用频域专家和仅使用图专家重构输出时的检测结果。可以看到，单专家直接输出的异常分数难以在异常区间内形成持续高于阈值的响应，说明只依靠单一插补误差不足以完成稳定检测。
 
     单频域专家与单图专家使用 Transformer 检测器的结果，以及图频门控融合直接重构输出与接 Transformer 检测器输出结果如图\ref{fig:ablation_transformer_gate}所示。
     \begin{figure}[!t]
@@ -1707,6 +1813,8 @@
         \caption{单专家与图频门控融合检测结果对比}
         \label{fig:ablation_transformer_gate}
     \end{figure}
+
+    图\ref{fig:ablation_transformer_gate}进一步比较了单专家、图频门控融合以及 Transformer 检测器的作用。与直接重构输出相比，接入 Transformer 后异常区间内的绿色曲线更容易形成连续响应；图频门控融合再接 Transformer 的结果最接近完整模型，说明双专家信息融合与时序重构检测器具有互补作用。
 
 
     \subsection{结果分析}
@@ -1762,6 +1870,8 @@
         \end{tabular}}
     \end{table}
 
+    表\ref{tab:sensitivity_temporal}中，“参数设置”列表示本次扫描的超参数类别，“取值”列表示对应实验配置，其余列给出该配置下的检测指标。该表主要用于观察时间窗口长度和自监督再遮挡比例变化时，模型对异常样本的检出能力是否稳定。
+
     从表~\ref{tab:sensitivity_temporal} 可以看出，\texttt{seq\_len} 是当前最敏感的核心参数。当窗口长度由 50 缩短至 30 时，F1 从 \(99.09\%\) 急剧下降到 \(80.45\%\)，降幅达到 18.64 个百分点；Recall 和 FDR 也由 \(98.20\%\) 同步下降至 \(67.30\%\)，在保持 \(FP=0\) 不变的条件下，\texttt{seq\_len}=30 时测试集假负例数由默认参考点下的 36 个显著增加到 654 个。由于该设置的阈值水平并未出现异常偏移，因此性能退化更可能源于表征能力不足而非阈值选择失衡。上述现象说明，过短的时间窗口难以充分捕获中长期动态模式、分布漂移信息及异常片段的连续结构，从而导致异常区间内部出现大面积漏检。
 
     相比之下，当 \texttt{seq\_len} 取 50、70 或 100 时，F1 始终保持在 \(99.07\%\) 以上，其中 50 与 100 的结果完全一致，表明只要模型获得足够的时间上下文，其性能对窗口长度具有较强鲁棒性。因此，当前数据条件下不宜使用过短窗口，而中等及偏长窗口均能维持稳定的检测效果。
@@ -1800,6 +1910,8 @@
         \end{tabular}}
     \end{table}
 
+    表\ref{tab:sensitivity_capacity}给出了模型容量相关参数的扫描结果。“参数设置”列包括检测器宽度、检测器层数和图卷积分支隐藏维度，“取值”列给出具体配置，其余列展示对应检测性能。通过该表可以判断性能变化是否来自模型容量不足、过度扩张或结构深度变化。
+
     从检测器宽度 \texttt{detector\_d\_model} 的结果可以看出，在 64 至 256 的扫描范围内，模型表现总体稳定，F1 的最大波动仅为 0.03 个百分点。其中，64 与 128 的结果完全一致，而 256 出现极轻微回落。这说明在当前数据规模、训练轮数及检测器深度设置下，中等宽度的表征空间已经足以支撑性能上限，进一步扩大通道宽度并未转化为实质性收益，反而可能引入一定冗余。
 
     检测器层数 \texttt{detector\_layers} 呈现出类似规律。2 层与 3 层结构均达到最优性能，1 层与 4 层仅出现极轻微退化，说明检测器深度在当前范围内并非主要性能瓶颈。更具体地说，过浅的结构可能限制时序模式的层级表达，而过深的结构则未能在当前任务上提供额外增益。因此，从稳定性与计算开销的折中角度看，2 至 3 层是更稳妥的选择。
@@ -1814,21 +1926,19 @@
 
 	    \chapter{全文总结与展望}
 
+        本章对全文研究内容进行归纳，首先总结本文围绕多采样率电源系统异常检测所完成的问题建模、方法设计和实验验证工作，然后结合当前数据来源、模型部署和复杂缺失场景等限制，给出后续研究展望。
+
         \section{全文总结}
 
-        本文围绕电源系统多采样率过程异常检测问题开展研究，针对多源监测变量采样频率不一致所引起的结构性缺失、时间异步、变量耦合关系难以表达以及周期频谱信息利用不足等关键挑战，先构建 VAE-Transformer 作为验证模型，再提出面向多采样率电源系统的自适应图--频率异常检测网络 AGF-ADNet。论文以三相全桥逆变系统为应用背景，从问题建模、模型设计、实验验证和机制分析等方面进行了较为系统的研究，主要工作与结论可概括如下。
+        本文围绕电源系统多采样率过程异常检测问题开展研究，针对多源监测变量采样频率不一致所引起的结构性缺失、变量耦合关系以及周期频谱信息利用不足等挑战，先构建 VAE-Former 作为验证模型，再提出自适应图--频率异常检测网络 AGF-ADNet。论文以三相全桥逆变系统为背景，从问题建模、模型设计、实验验证等方面进行了系统的研究，主要工作与结论可概括如下。
 
-        第一，围绕多采样率工业数据的基本特征，构建了两类方法共享的异常检测问题描述与数据处理流程。本文通过缺失掩码生成、仅基于观测位置的标准化、滑动窗口构造、采样率元数据推断以及自监督再遮挡等步骤，将原始多采样率监测序列转化为适合统一建模的窗口样本表示，为后续插补与检测协同优化奠定了数据基础。该表示方式能够显式保留何处缺失、何处观测的结构信息，同时为采样率感知建模提供必要先验。
+        第一，围绕多采样率工业数据特征，构建了两类方法共享的异常检测问题描述与数据处理流程。本文通过缺失掩码生成、仅基于观测位置的标准化、滑动窗口构造、采样率元数据推断以及自监督再遮挡等步骤，将原始多采样率监测序列转化为适合统一建模的窗口样本表示。并设计了 VAE-Former 验证模型。该模型以掩码感知 VAE 作为插补器，将观测值和观测掩码共同输入编码器，同时参考 MC-CNN 的改进 BP 思想，使重构相关损失仅在原始可观测位置反向传播，避免缺失占位值形成伪监督；随后利用采样率感知 Transformer 对补全窗口进行全局重构检测。
 
-        第二，设计了 VAE-Transformer 简化验证模型。该模型以掩码感知 VAE 作为插补器，将观测值和观测掩码共同输入编码器，并参考 MC-CNN 的改进 BP 思想，使重构相关损失仅在原始可观测位置反向传播，避免缺失占位值形成伪监督；随后利用采样率感知 Transformer 对补全窗口进行全局重构检测。
+        第二，在VAE-Former的基础上，针对多采样率场景下缺失恢复不可靠与异常表征不足的问题，设计了 AGF-ADNet 模型。模型在插补阶段引入双向预插补与自监督再遮挡机制，为学习型缺失恢复提供稳定初始化与有效监督；进一步构建自适应图重构专家与频域重构专家，分别从跨变量依赖关系和周期频谱结构两条路径补充信息，并通过采样率感知门控融合模块生成最终插补结果。在检测阶段，模型利用采样率感知 Transformer 对完整窗口进行全局重构，同时融合重构偏差、双专家分歧与分布漂移三类信号构建异常评分。
 
-        第三，在VAE-Transformer的基础上，针对多采样率场景下缺失恢复不可靠与异常表征不足的问题，设计了 AGF-ADNet 模型。模型在插补阶段引入双向预插补与自监督再遮挡机制，为学习型缺失恢复提供稳定初始化与有效监督；进一步构建自适应图重构专家与频域重构专家，分别从跨变量依赖关系和周期频谱结构两条路径补充信息，并通过采样率感知门控融合模块生成最终插补结果。在检测阶段，模型利用采样率感知 Transformer 对完整窗口进行全局重构，同时融合重构偏差、双专家分歧与分布漂移三类信号构建异常评分，实现了插补与检测的一体化协同建模。
+        第三，基于三相全桥逆变系统实验平台采集数据，对所提方法进行了系统验证。实验数据包含 18 个人工特征，并通过降采样构造多采样率变量场景。与 CNN、LSTM、VAE、Transformer、MC-CNN、MRA-LSTM、Multirate Former 以及 MR-FA 等方法相比，AGF-ADNet 在当前测试集上取得了 99.10\% 的 Accuracy、100.00\% 的 Precision、98.20\% 的 Recall、98.20\% 的 FDR、0.00\% 的 FAR 和 99.10\% 的 F1-Score。相较于本实验中性能最优的对比方法 MR-FA，所提方法的 Accuracy 提升了 12.18 个百分点，Recall 和 FDR 提升了 21.00 个百分点，F1-Score 提升了 13.58 个百分点，同时将误报率降低至 0，表明该方法在异常检出能力与误报抑制能力之间实现了更优平衡。同时结合消融实验与参数敏感性实验，对模型有效性来源进行了进一步分析。消融结果表明，完整 AGF-ADNet 在所有消融设置中取得最优性能，说明双专家插补、门控融合、采样率感知检测器以及多源异常评分之间存在明显协同作用。参数敏感性结果表明，序列窗口长度是最关键的敏感因素，过短窗口会显著削弱异常片段的连续检出能力；再遮挡比例、检测器宽度与层数在取值范围内检测效果波动不大，GCN 分支隐藏维度则呈现中间最优特征。
 
-        第四，基于三相全桥逆变系统实验平台采集数据，对所提方法进行了系统验证。实验数据包含 18 个人工特征，并通过降采样构造多采样率变量场景。与 CNN、LSTM、VAE、Transformer、MC-CNN、MRA-LSTM、Multirate Former 以及 MR-FA 等方法相比，AGF-ADNet 在测试集上取得了 99.10\% 的 Accuracy、100.00\% 的 Precision、98.20\% 的 Recall、98.20\% 的 FDR、0.00\% 的 FAR 和 99.10\% 的 F1-Score。相较于性能最优的对比方法 MR-FA，所提方法的 Accuracy 提升了 12.18 个百分点，Recall 和 FDR 提升了 21.00 个百分点，F1-Score 提升了 13.58 个百分点，同时将误报率降低至 0，表明该方法在异常检出能力与误报抑制能力之间实现了更优平衡。
-
-        第五，结合消融实验与参数敏感性实验，对模型有效性来源进行了进一步分析。消融结果表明，完整 AGF-ADNet 在所有消融设置中取得最优性能，说明双专家插补、门控融合、采样率感知检测器以及多源异常评分之间存在明显协同作用。图频门控 + Transformer 是最接近完整模型的消融版本，F1-Score 达到 0.9250，但与完整模型相比仍存在召回率差距，表明采样率感知建模、相位信息和分布漂移分数对故障窗口覆盖能力具有进一步增益。单专家结果显示，仅图专家 + Transformer 明显优于仅频域专家 + Transformer，说明当前故障场景中变量间耦合关系是更主要的判别信息来源；而图频门控 + 重构输出和两个单专家直接重构输出的结果则表明，仅依赖插补重构误差难以形成稳定连续的异常响应，Transformer 检测器对于最终检测性能具有关键作用。参数敏感性结果表明，序列窗口长度是最关键的敏感因素，过短窗口会显著削弱异常片段的连续检出能力；相比之下，再遮挡比例、检测器宽度与层数在当前取值范围内表现出较好的鲁棒性，GCN 分支隐藏维度则呈现较明显的中间最优特征。
-
-        综合来看，VAE-Transformer 验证了先进行插补并使用 Transformer 检测具有可行性，而 AGF-ADNet 进一步通过图频双专家与多源评分机制提升了缺失恢复和异常判别能力。本文所提出的 AGF-ADNet 能够较好地缓解多采样率场景下的结构性缺失问题，并充分利用变量耦合关系、频谱特征与全局时序演化信息，在电源系统异常检测任务中表现出较高的检测精度、较强的鲁棒性以及一定的工程应用潜力。
+        综合来看，本文所提出的 AGF-ADNet 能够较好地缓解多采样率场景下的结构性缺失问题，并充分利用变量耦合关系、频谱特征与全局时序演化信息，在电源系统异常检测任务中表现出较高的检测精度、较强的鲁棒性以及一定的工程应用潜力。
 
         \section{研究展望}
 
@@ -1836,7 +1946,7 @@
 
         第一，拓展数据来源，提升模型泛化能力。本文实验主要基于三相全桥逆变系统平台数据展开，未来可在更多真实工业场景中采集数据，覆盖不同负载工况、故障类型和设备平台，提升模型在复杂工程环境中的可迁移性与泛化稳定性。
 
-        第二，面向在线监测与边缘部署需求，进一步优化模型效率。当前模型采用双专家插补与 Transformer 全局重构相结合的结构，在实时性、模型规模和部署成本方面仍有优化空间。后续可探索构建更轻量化、适用于在线诊断、嵌入式或边缘设备的多采样率异常检测框架。
+        第二，面向在线监测与边缘部署需求，进一步优化模型效率。当前模型在实时性、模型规模和部署成本方面仍有优化空间。后续可探索构建更轻量化、适用于在线诊断、嵌入式或边缘设备的检测框架。
 
         第三，增强模型对复杂缺失模式与不确定性的适应能力。本文重点关注多采样率带来的结构缺失，实际工业现场可能同时存在随机丢包、通信异常、标签噪声以及多故障耦合等问题。未来可进一步增强系统在复杂场景下的鲁棒性。
 
@@ -1847,7 +1957,7 @@
 
         四年的大学时光即将落下帷幕。在此论文完成之际，我谨向所有曾给予我帮助和支持的人表达最诚挚的谢意。
 
-        首先，我必须特别感谢我的老师王敏和邱根。在本次研究和论文撰写的过程中，两位老师严谨的治学态度和渊博的学识让我受益匪浅。他们为我提供了非常宝贵且专业的指导意见，指引我不断拓宽思路、完善细节。同时，我要向我的师兄王思贻表达深深的感激，从论文的初期准备到最终定稿，他为我提供了全程的跟进与细致的指导，倾注了大量的心血，帮助我克服了诸多困难。
+        首先，我必须特别感谢我的老师邱根和王敏。在本次研究和论文撰写的过程中，两位老师严谨的治学态度和渊博的学识让我受益匪浅。他们为我提供了非常宝贵且专业的指导意见，指引我不断拓宽思路、完善细节。同时，我要向我的师兄王思贻表达深深的感激，从论文的初期准备到最终定稿，他为我提供了全程的跟进与细致的指导，倾注了大量的心血，帮助我克服了诸多困难。
 
         其次，我要感谢我们的母校——电子科大。感谢学校为我提供了优良的学习环境和广阔的成长平台，让我在这里度过了充实而难忘的青春岁月。
 
